@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"time"
 
-	"golang.org/x/net/html"
+	"github.com/PuerkitoBio/goquery"
 )
 
 type HTTPClient interface {
@@ -28,6 +28,14 @@ type Options struct {
 	HTTPClient HTTPClient
 }
 
+type Seo struct {
+	HasTitle       bool   `json:"has_title" binding:"required"`
+	Title          string `json:"title" binding:"required"`
+	HasDescription bool   `json:"has_description" binding:"required"`
+	Description    string `json:"description" binding:"required"`
+	HasH1          bool   `json:"has_h1" binding:"required"`
+}
+
 type Page struct {
 	URL         string       `json:"url" binding:"required"`
 	Depth       int          `json:"depth" binding:"required"`
@@ -35,6 +43,7 @@ type Page struct {
 	Status      string       `json:"status" binding:"required"`
 	Error       error        `json:"error" binding:"required"`
 	BrokenLinks []BrokenLink `json:"broken_links" binding:"required"`
+	Seo         Seo          `json:"seo" binding:"required"`
 }
 
 type BrokenLink struct {
@@ -111,12 +120,6 @@ func ValidateURL(ctx context.Context, opts Options, URL string) ValidateOutput {
 
 	if err != nil {
 
-		unwrapErr := err
-		for unwrapErr != nil {
-			fmt.Printf("%T %v \n", unwrapErr, unwrapErr)
-			unwrapErr = errors.Unwrap(unwrapErr)
-		}
-
 		return ValidateOutput{
 			URL:        parsedURL.String(),
 			BrokenLink: true,
@@ -167,9 +170,13 @@ func AnalyzeURL(ctx context.Context, opts Options) (AnalyzeOutput, error) {
 			},
 		}, nil
 	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
-	// 2. Ищем битые ссылки
-	doc, err := html.Parse(resp.Body)
+	// 2. Получаем SEO-данные
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
 		return AnalyzeOutput{
 			RootURL:     opts.URL,
@@ -183,31 +190,40 @@ func AnalyzeURL(ctx context.Context, opts Options) (AnalyzeOutput, error) {
 					Error:       err,
 				},
 			},
-		}, fmt.Errorf("ошибка чтения html страницы: %w", err)
+		}, nil
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
+
+	seoData := Seo{}
+
+	if doc.Find("h1").Length() > 0 {
+		seoData.HasH1 = true
+	}
+	if doc.Find("title").Length() > 0 {
+		seoData.HasTitle = true
+		seoData.Title = doc.Find("title").Text()
+	}
+	if doc.Find(`meta[name="description"]`).Length() > 0 {
+		seoData.HasDescription = true
+		seoData.Description = doc.Find(`meta[name="description"]`).AttrOr("content", "")
+	}
+
+	// 3. Ищем битые ссылки
 
 	brokenLinks := []BrokenLink{}
-	for n := range doc.Descendants() {
-		if n.Type == html.ElementNode && n.Data == "a" {
+
+	doc.Find("a").
+		Each(func(i int, s *goquery.Selection) {
 			pageURL := ""
-			for _, a := range n.Attr {
-				if a.Key == "href" {
-					pageURL = a.Val
-					break
-				}
-			}
+			pageURL = s.AttrOr("href", "")
 
 			validationOutput := ValidateURL(ctx, opts, pageURL)
 
 			if validationOutput.InvalidURL {
-				continue
+				return
 			}
 
 			if !validationOutput.BrokenLink {
-				continue
+				return
 			}
 
 			brokenLinks = append(brokenLinks, BrokenLink{
@@ -215,10 +231,9 @@ func AnalyzeURL(ctx context.Context, opts Options) (AnalyzeOutput, error) {
 				Error:      validationOutput.Error,
 				StatusCode: validationOutput.StatusCode,
 			})
-		}
-	}
+		})
 
-	// 3. Формируем отчет
+	// 4. Формируем отчет
 	return AnalyzeOutput{
 		RootURL:     opts.URL,
 		Depth:       opts.Depth,
@@ -231,6 +246,7 @@ func AnalyzeURL(ctx context.Context, opts Options) (AnalyzeOutput, error) {
 				Status:      resp.Status,
 				Error:       nil,
 				BrokenLinks: brokenLinks,
+				Seo:         seoData,
 			},
 		},
 	}, nil
