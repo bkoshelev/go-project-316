@@ -3,7 +3,8 @@ package crawler
 import (
 	"context"
 	"encoding/json"
-	"io"
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -29,7 +30,7 @@ type Page struct {
 	Depth      int    `json:"depth" binding:"required"`
 	HTTPStatus int    `json:"http_status" binding:"required"`
 	Status     string `json:"status" binding:"required"`
-	Error      string `json:"error" binding:"required"`
+	Error      error  `json:"error" binding:"required"`
 }
 
 type AnalyzeOutput struct {
@@ -39,17 +40,19 @@ type AnalyzeOutput struct {
 	Pages       []Page `json:"pages" binding:"required"`
 }
 
-func Analyze(ctx context.Context, opts Options) ([]byte, error) {
-
+func makeRequest(ctx context.Context, opts Options, URL, method string) (*http.Response, error) {
+	if method != "HEAD" && method != "GET" {
+		return nil, errors.New("неверный тип запроса")
+	}
 	req, err := http.NewRequestWithContext(
 		ctx,
-		http.MethodGet,
-		opts.URL,
+		method,
+		URL,
 		nil,
 	)
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ошибка создания запроса: %w", err)
 	}
 
 	if opts.UserAgent != "" {
@@ -57,25 +60,47 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	}
 
 	resp, err := opts.HTTPClient.Do(req)
+
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ошибка выполнения запроса: %w", err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
-	errorText := ""
+	return resp, nil
+}
 
-	if resp.StatusCode != 200 {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, err
-		}
+type ValidateOutput struct {
+	URL        string
+	InvalidURL bool
+	BrokenLink bool
+	Error      error
+	StatusCode int
+}
 
-		errorText = string(body)
+func AnalyzeURL(ctx context.Context, opts Options) (AnalyzeOutput, error) {
+
+	// 1. Получаем тело страницы
+	resp, err := makeRequest(ctx, opts, opts.URL, http.MethodGet)
+
+	if err != nil {
+		return AnalyzeOutput{
+			RootURL:     opts.URL,
+			Depth:       opts.Depth,
+			GeneratedAt: time.Now().Format(time.RFC3339),
+			Pages: []Page{
+				{
+					URL:   opts.URL,
+					Depth: 0,
+					Error: err,
+				},
+			},
+		}, nil
 	}
 
-	output := AnalyzeOutput{
+	// 2. Формируем отчет
+	return AnalyzeOutput{
 		RootURL:     opts.URL,
 		Depth:       opts.Depth,
 		GeneratedAt: time.Now().Format(time.RFC3339),
@@ -85,15 +110,25 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 				Depth:      0,
 				HTTPStatus: resp.StatusCode,
 				Status:     resp.Status,
-				Error:      errorText,
+				Error:      nil,
 			},
 		},
-	}
+	}, nil
+}
 
-	fmtOutput, err := json.MarshalIndent(output, "", "  ")
+func Analyze(ctx context.Context, opts Options) ([]byte, error) {
+	output, err := AnalyzeURL(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	return fmtOutput, nil
+	return output.format(), nil
+}
+
+func (output AnalyzeOutput) format() []byte {
+	fmtOutput, err := json.MarshalIndent(output, "", "  ")
+	if err != nil {
+		panic("ошибка форматирования результата")
+	}
+	return fmtOutput
 }
