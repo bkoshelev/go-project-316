@@ -75,29 +75,25 @@ func AnalyzeCli(customHTTPClient *http.Client) int {
 			}
 
 			options := crawler.Options{
-				URL:        cmd.StringArg("url"),
-				Depth:      cmd.Int("depth"),
-				UserAgent:  cmd.String("user-agent"),
-				HTTPClient: HTTPClient,
+				URL:         cmd.StringArg("url"),
+				Depth:       cmd.Int("depth"),
+				UserAgent:   cmd.String("user-agent"),
+				HTTPClient:  HTTPClient,
+				Concurrency: cmd.Int("workers"),
 				// Retries:    cmd.Int("retries"),
 				// Delay:      cmd.String("delay"),
 				// Timeout:    cmd.String("timeout"),
 			}
 
-			result, err := crawler.Analyze(ctx, options)
+			result := crawler.Analyze(ctx, options)
 
-			if err != nil {
-				return fmt.Errorf("something wrong: %w", err)
-			}
-
-			fmt.Println(string(result))
+			fmt.Println(string(result.Format()))
 			return nil
 		},
 	}
 
 	if err := cmd.Run(context.Background(), os.Args); err != nil {
 		fmt.Println(err)
-		return 0
 	}
 	return 0
 }
