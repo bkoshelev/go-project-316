@@ -1,15 +1,19 @@
 package crawler
 
 import (
+	"bytes"
+	"code/internal/page"
 	"context"
 	"errors"
+	"html/template"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"syscall"
 	"testing"
-	"text/template"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -35,17 +39,17 @@ func assertError(t testing.TB, want, got error) {
 	assert.ErrorContains(t, got, want.Error())
 }
 
-func AssertBrokenLinks(t testing.TB, want, got []BrokenLink) {
+func AssertBrokenLinks(t testing.TB, want, got []page.BrokenLink) {
 	t.Helper()
 
-	gotByURL := make(map[string]BrokenLink, len(got))
+	gotByURL := make(map[string]page.BrokenLink, len(got))
 	for _, link := range got {
-		gotByURL[link.Url] = link
+		gotByURL[link.URL] = link
 	}
 
 	for _, wantLink := range want {
-		gotLink, exists := gotByURL[wantLink.Url]
-		assert.Truef(t, exists, "broken link is missing: %s", wantLink.Url)
+		gotLink, exists := gotByURL[wantLink.URL]
+		assert.Truef(t, exists, "broken link is missing: %s", wantLink.URL)
 		assert.Equal(t, wantLink.StatusCode, gotLink.StatusCode)
 		assertError(t, wantLink.Error, gotLink.Error)
 	}
@@ -56,7 +60,7 @@ func AssertAnalyzeOutput(t testing.TB, want, got AnalyzeOutput) {
 	assert.Equal(t, want.Depth, got.Depth)
 	assert.Equal(t, want.RootURL, got.RootURL)
 
-	gotByURL := make(map[string]Page, len(got.Pages))
+	gotByURL := make(map[string]page.Page, len(got.Pages))
 	for _, page := range got.Pages {
 		gotByURL[page.URL] = page
 	}
@@ -68,7 +72,7 @@ func AssertAnalyzeOutput(t testing.TB, want, got AnalyzeOutput) {
 		assert.Equal(t, wantPage.Depth, gotPage.Depth)
 		assert.Equal(t, wantPage.HTTPStatus, gotPage.HTTPStatus)
 		assert.Equal(t, wantPage.Status, gotPage.Status)
-		assert.Equal(t, wantPage.Seo, gotPage.Seo)
+		assert.Equal(t, wantPage.SEO, gotPage.SEO)
 		assertError(t, wantPage.Error, gotPage.Error)
 		AssertBrokenLinks(t, wantPage.BrokenLinks, gotPage.BrokenLinks)
 	}
@@ -99,20 +103,21 @@ func TestCrawler_Subtests(t *testing.T) {
 					HTTPClient:  server.Client(),
 					Depth:       0,
 					Concurrency: 3,
+					Timeout:     time.Second * 15,
 				}
 			}),
 			func(URL string) AnalyzeOutput {
 				return AnalyzeOutput{
 					RootURL: URL,
 					Depth:   0,
-					Pages: []Page{
+					Pages: []page.Page{
 						{
 							URL:         URL,
 							Depth:       0,
 							HTTPStatus:  200,
 							Status:      "200 OK",
 							Error:       nil,
-							BrokenLinks: []BrokenLink{},
+							BrokenLinks: []page.BrokenLink{},
 						},
 					},
 				}
@@ -132,19 +137,20 @@ func TestCrawler_Subtests(t *testing.T) {
 					HTTPClient:  server.Client(),
 					Depth:       0,
 					Concurrency: 3,
+					Timeout:     time.Second * 15,
 				}
 			}),
 			createWant(func(URL string) AnalyzeOutput {
 				return AnalyzeOutput{
 					RootURL: URL,
 					Depth:   0,
-					Pages: []Page{
+					Pages: []page.Page{
 						{
 							URL:         URL,
 							Depth:       0,
 							HTTPStatus:  400,
 							Status:      "400 Bad Request",
-							BrokenLinks: []BrokenLink{},
+							BrokenLinks: []page.BrokenLink{},
 						},
 					},
 				}
@@ -166,18 +172,19 @@ func TestCrawler_Subtests(t *testing.T) {
 					HTTPClient:  client,
 					Depth:       0,
 					Concurrency: 3,
+					Timeout:     time.Second * 15,
 				}
 			}),
 			createWant(func(URL string) AnalyzeOutput {
 				return AnalyzeOutput{
 					RootURL: URL,
 					Depth:   0,
-					Pages: []Page{
+					Pages: []page.Page{
 						{
 							URL:         URL,
 							Depth:       0,
 							Error:       context.DeadlineExceeded,
-							BrokenLinks: []BrokenLink{},
+							BrokenLinks: []page.BrokenLink{},
 						},
 					},
 				}
@@ -199,6 +206,7 @@ func TestCrawler_Subtests(t *testing.T) {
 					HTTPClient:  server.Client(),
 					Depth:       0,
 					Concurrency: 3,
+					Timeout:     time.Second * 15,
 				}
 			}),
 			createWant(func(URL string) AnalyzeOutput {
@@ -206,12 +214,12 @@ func TestCrawler_Subtests(t *testing.T) {
 				return AnalyzeOutput{
 					RootURL: URL,
 					Depth:   0,
-					Pages: []Page{
+					Pages: []page.Page{
 						{
 							URL:         URL,
 							Depth:       0,
 							Error:       syscall.ECONNREFUSED,
-							BrokenLinks: []BrokenLink{},
+							BrokenLinks: []page.BrokenLink{},
 						},
 					},
 				}
@@ -251,6 +259,7 @@ func TestCrawler_Subtests(t *testing.T) {
 					HTTPClient:  server.Client(),
 					Depth:       0,
 					Concurrency: 3,
+					Timeout:     time.Second * 15,
 				}
 			}),
 			createWant(func(URL string) AnalyzeOutput {
@@ -263,18 +272,18 @@ func TestCrawler_Subtests(t *testing.T) {
 				return AnalyzeOutput{
 					RootURL: URL,
 					Depth:   0,
-					Pages: []Page{
+					Pages: []page.Page{
 						{
 							URL:        URL,
 							Depth:      0,
 							Error:      nil,
 							HTTPStatus: 200,
 							Status:     "200 OK",
-							BrokenLinks: []BrokenLink{
-								{Url: URL + "/contacts", StatusCode: 404},
-								{Url: "https://cdn." + parsedURL.Host + "/app.js", Error: errors.New("no such host")},
+							BrokenLinks: []page.BrokenLink{
+								{URL: URL + "/contacts", StatusCode: 404},
+								{URL: "https://cdn." + parsedURL.Host + "/app.js", Error: errors.New("no such host")},
 							},
-							Seo: Seo{
+							SEO: page.SEO{
 								HasTitle: true,
 								Title:    "Simple Test",
 							},
@@ -312,6 +321,7 @@ func TestCrawler_Subtests(t *testing.T) {
 					HTTPClient:  server.Client(),
 					Depth:       0,
 					Concurrency: 3,
+					Timeout:     time.Second * 15,
 				}
 			}),
 			createWant(func(URL string) AnalyzeOutput {
@@ -319,17 +329,17 @@ func TestCrawler_Subtests(t *testing.T) {
 				return AnalyzeOutput{
 					RootURL: URL,
 					Depth:   0,
-					Pages: []Page{
+					Pages: []page.Page{
 						{
 							URL:        URL,
 							Depth:      0,
 							Error:      nil,
 							HTTPStatus: 200,
 							Status:     "200 OK",
-							BrokenLinks: []BrokenLink{
-								{Url: URL + "/about", StatusCode: 404},
+							BrokenLinks: []page.BrokenLink{
+								{URL: URL + "/about", StatusCode: 404},
 							},
-							Seo: Seo{
+							SEO: page.SEO{
 								HasTitle:       true,
 								Title:          "Contacts",
 								HasDescription: true,
@@ -370,6 +380,7 @@ func TestCrawler_Subtests(t *testing.T) {
 					HTTPClient:  server.Client(),
 					Depth:       0,
 					Concurrency: 3,
+					Timeout:     time.Second * 15,
 				}
 			}),
 			createWant(func(URL string) AnalyzeOutput {
@@ -377,15 +388,15 @@ func TestCrawler_Subtests(t *testing.T) {
 				return AnalyzeOutput{
 					RootURL: URL,
 					Depth:   0,
-					Pages: []Page{
+					Pages: []page.Page{
 						{
 							URL:         URL,
 							Depth:       0,
 							Error:       nil,
 							HTTPStatus:  200,
 							Status:      "200 OK",
-							BrokenLinks: []BrokenLink{},
-							Seo: Seo{
+							BrokenLinks: []page.BrokenLink{},
+							SEO: page.SEO{
 								HasTitle:       false,
 								HasDescription: false,
 								HasH1:          false,
@@ -396,7 +407,7 @@ func TestCrawler_Subtests(t *testing.T) {
 			}),
 		},
 		{
-			"проверка обхода в глубину",
+			"проверка обхода в глубину (без задержки)",
 			func() (*httptest.Server, *http.Client) {
 				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
@@ -448,6 +459,7 @@ func TestCrawler_Subtests(t *testing.T) {
 					HTTPClient:  server.Client(),
 					Depth:       2,
 					Concurrency: 3,
+					Timeout:     time.Second * 15,
 				}
 			}),
 			createWant(func(URL string) AnalyzeOutput {
@@ -460,17 +472,17 @@ func TestCrawler_Subtests(t *testing.T) {
 				return AnalyzeOutput{
 					RootURL: URL,
 					Depth:   2,
-					Pages: []Page{
+					Pages: []page.Page{
 						{
 							URL:        URL,
 							Depth:      0,
 							Error:      nil,
 							HTTPStatus: 200,
 							Status:     "200 OK",
-							BrokenLinks: []BrokenLink{
-								{Url: "https://cdn." + parsedURL.Host + "/app.js", Error: errors.New("no such host")},
+							BrokenLinks: []page.BrokenLink{
+								{URL: "https://cdn." + parsedURL.Host + "/app.js", Error: errors.New("no such host")},
 							},
-							Seo: Seo{
+							SEO: page.SEO{
 								HasTitle:       true,
 								Title:          "Simple Test",
 								HasDescription: false,
@@ -483,8 +495,8 @@ func TestCrawler_Subtests(t *testing.T) {
 							Error:       nil,
 							HTTPStatus:  200,
 							Status:      "200 OK",
-							BrokenLinks: []BrokenLink{},
-							Seo: Seo{
+							BrokenLinks: []page.BrokenLink{},
+							SEO: page.SEO{
 								HasTitle:       true,
 								Title:          "Contacts",
 								HasDescription: true,
@@ -498,8 +510,8 @@ func TestCrawler_Subtests(t *testing.T) {
 							Error:       nil,
 							HTTPStatus:  200,
 							Status:      "200 OK",
-							BrokenLinks: []BrokenLink{},
-							Seo: Seo{
+							BrokenLinks: []page.BrokenLink{},
+							SEO: page.SEO{
 								HasTitle:       true,
 								Title:          "О сайте",
 								HasDescription: false,
@@ -528,4 +540,86 @@ func TestCrawler_Subtests(t *testing.T) {
 		})
 	}
 
+}
+
+type recordingHTTPClient struct {
+	previousRequestTime time.Time
+	t                   testing.TB
+	requestsStartTime   []time.Time
+}
+
+func (c *recordingHTTPClient) Do(r *http.Request) (*http.Response, error) {
+	c.requestsStartTime = append(c.requestsStartTime, time.Now())
+	if c.previousRequestTime != (time.Time{}) {
+		delay := time.Since(c.previousRequestTime)
+		isDelayWasMade := delay >= time.Millisecond*250
+		assert.Truef(c.t, isDelayWasMade, "задержка слишком мала = ", delay)
+	}
+	c.previousRequestTime = time.Now()
+
+	var buf bytes.Buffer
+
+	switch r.URL.Path {
+	case "/":
+		tmpl, _ := template.ParseFiles("../mocks/index.html")
+		err := tmpl.Execute(&buf, map[string]string{
+			"BaseURL": r.Host,
+		})
+
+		if err != nil {
+			panic("ошибка чтения html-файла")
+		}
+
+	case "/contacts":
+		data, _ := os.ReadFile("../mocks/contacts.html")
+		buf.Write(data)
+
+	case "/about":
+		data, _ := os.ReadFile("../mocks/about.html")
+		buf.Write(data)
+	default:
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Status:     "404 OK",
+			Body:       io.NopCloser(&buf),
+			Request:    r,
+		}, nil
+	}
+
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Body:       io.NopCloser(&buf),
+		Request:    r,
+	}, nil
+}
+
+func TestCrawler_WithDelay(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		HTTPClient := &recordingHTTPClient{t: t}
+		windowStart := time.Now()
+		windowEnd := windowStart.Add(time.Second)
+
+		Analyze(
+			context.Background(),
+			Options{
+				URL:         "https://test.url/",
+				HTTPClient:  HTTPClient,
+				Depth:       2,
+				Concurrency: 5,
+				Timeout:     time.Second * 15,
+				Delay:       time.Millisecond * 250,
+			},
+		)
+
+		requestPerSecond := 0
+
+		for _, request := range HTTPClient.requestsStartTime {
+			if request.Before(windowEnd) {
+				requestPerSecond++
+			}
+		}
+
+		assert.Truef(t, requestPerSecond <= 4, "превышено количество запросов в секунду")
+	})
 }

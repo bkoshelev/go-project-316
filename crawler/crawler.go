@@ -1,90 +1,43 @@
 package crawler
 
 import (
+	httpclient "code/internal/http_client"
+	"code/internal/link"
+	"code/internal/page"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
-	"net/http"
-	"net/url"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
-
-	"github.com/PuerkitoBio/goquery"
 )
-
-type HTTPClient interface {
-	Do(req *http.Request) (*http.Response, error)
-}
 
 type Options struct {
 	URL         string
 	Depth       int
 	Retries     int
-	Delay       string
-	Timeout     string
+	Delay       time.Duration
+	Timeout     time.Duration
 	UserAgent   string
 	Concurrency int
 	// IndentJSON,
-	HTTPClient HTTPClient
+	HTTPClient httpclient.HTTPClient
 }
 
-type Seo struct {
-	HasTitle       bool   `json:"has_title" binding:"required"`
-	Title          string `json:"title" binding:"required"`
-	HasDescription bool   `json:"has_description" binding:"required"`
-	Description    string `json:"description" binding:"required"`
-	HasH1          bool   `json:"has_h1" binding:"required"`
+type Job struct {
+	Type        string
+	PageOptions page.PageOptions
+	LinkOptions link.LinkOptions
 }
-
-type Page struct {
-	URL         string       `json:"url" binding:"required"`
-	Depth       int          `json:"depth" binding:"required"`
-	HTTPStatus  int          `json:"http_status" binding:"required"`
-	Status      string       `json:"status" binding:"required"`
-	Error       error        `json:"error" binding:"required"`
-	BrokenLinks []BrokenLink `json:"broken_links" binding:"required"`
-	Seo         Seo          `json:"seo" binding:"required"`
-}
-
-type BrokenLink struct {
-	Url        string `json:"url" binding:"required"`
-	StatusCode int    `json:"status_code" binding:"required"`
-	Error      error  `json:"error" binding:"required"`
-}
-
 type AnalyzeOutput struct {
-	RootURL     string `json:"root_url" binding:"required"`
-	Depth       int    `json:"depth" binding:"required"`
-	GeneratedAt string `json:"generated_at" binding:"required"`
-	Pages       []Page `json:"pages" binding:"required"`
+	RootURL     string      `json:"root_url" binding:"required"`
+	Depth       int         `json:"depth" binding:"required"`
+	GeneratedAt string      `json:"generated_at" binding:"required"`
+	Pages       []page.Page `json:"pages" binding:"required"`
 }
-
-type LinkOptions struct {
-	pageURL string
-	pageIdx int64
-	linkURl string
-	Depth   int
-}
-
-type LinkAnalizeOutput struct {
-	Url        string
-	pageIdx    int64
-	StatusCode int
-	Error      error
-	pageURL    string
-}
-
-type PageOptions struct {
-	PageURL string
-	Depth   int
-	Idx     int64
-}
-
-var counter atomic.Int64
 
 type VisitedURLs struct {
 	mu sync.RWMutex
@@ -104,197 +57,48 @@ func (c *VisitedURLs) Add(value string) {
 	c.m[value] = struct{}{}
 }
 
-var visitedUrls VisitedURLs
-
-func makeRequest(ctx context.Context, opts Options, URL, method string) (*http.Response, error) {
-	if method != "HEAD" && method != "GET" {
-		return nil, errors.New("неверный тип запроса")
-	}
-	req, err := http.NewRequestWithContext(
-		ctx,
-		method,
-		URL,
-		nil,
-	)
-
-	if err != nil {
-		return nil, fmt.Errorf("ошибка создания запроса: %w", err)
-	}
-
-	if opts.UserAgent != "" {
-		req.Header.Set("User-Agent", opts.UserAgent)
-	}
-
-	resp, err := opts.HTTPClient.Do(req)
-
-	if err != nil {
-		return nil, fmt.Errorf("ошибка выполнения запроса: %w", err)
-	}
-
-	return resp, nil
+type Queue struct {
+	Mu sync.RWMutex
+	M  []Job
 }
 
-func AnalyzeLink(ctx context.Context, linkOptions LinkOptions, linkAnalyzeOutputs chan<- LinkAnalizeOutput, analyzePageJobs chan<- PageOptions, opts Options, wg *sync.WaitGroup) {
-	defer wg.Done()
+func (q *Queue) Shift() (Job, bool) {
+	q.Mu.RLock()
+	defer q.Mu.RUnlock()
 
-	if linkOptions.linkURl == "" {
-		return
+	if len(q.M) > 0 {
+		val := q.M[0]
+		q.M = q.M[1:]
+
+		return val, true
 	}
-
-	parsedURL, err := url.Parse(linkOptions.linkURl)
-	if err != nil {
-		return
-	}
-
-	url := linkOptions.linkURl
-
-	if parsedURL.IsAbs() {
-		if !validateLink(linkOptions.linkURl) {
-			return
-		}
-	} else {
-		normalizedURL, err := normalizeLink(linkOptions.linkURl, linkOptions.pageURL)
-		if err != nil {
-			return
-		}
-		url = normalizedURL.String()
-	}
-
-	resp, err := makeRequest(ctx, opts, url, http.MethodHead)
-	if err != nil {
-		linkAnalyzeOutputs <- LinkAnalizeOutput{
-			Url:     url,
-			Error:   err,
-			pageIdx: linkOptions.pageIdx,
-			pageURL: linkOptions.pageURL,
-		}
-		return
-	}
-
-	if resp.StatusCode == 405 {
-		resp, err = makeRequest(ctx, opts, url, http.MethodGet)
-		if err != nil {
-			linkAnalyzeOutputs <- LinkAnalizeOutput{
-				Url:     url,
-				Error:   err,
-				pageIdx: linkOptions.pageIdx,
-				pageURL: linkOptions.pageURL,
-			}
-			return
-		}
-	}
-
-	if resp.StatusCode != 200 {
-		linkAnalyzeOutputs <- LinkAnalizeOutput{
-			Url:        url,
-			StatusCode: resp.StatusCode,
-			pageIdx:    linkOptions.pageIdx,
-			pageURL:    linkOptions.pageURL,
-		}
-		return
-	}
-
-	if _, ok := visitedUrls.Get(url); !ok &&
-		!parsedURL.IsAbs() &&
-		linkOptions.Depth+1 <= opts.Depth {
-		visitedUrls.Add(url)
-		wg.Add(1)
-		analyzePageJobs <- PageOptions{
-			PageURL: url,
-			Depth:   linkOptions.Depth + 1,
-			Idx:     counter.Add(1),
-		}
-	}
-}
-func AnalyzePage(ctx context.Context, pageOpts PageOptions, pageAnalyzeOutputs chan<- Page, analyzeLinksJobs chan<- LinkOptions, opts Options, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	// 1. Получаем тело страницы
-	resp, err := makeRequest(ctx, opts, pageOpts.PageURL, http.MethodGet)
-
-	if err != nil {
-		pageAnalyzeOutputs <- Page{
-			BrokenLinks: []BrokenLink{},
-			URL:         pageOpts.PageURL,
-			Depth:       pageOpts.Depth,
-			Error:       err,
-		}
-		return
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	// 2. Получаем SEO-данные
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		pageAnalyzeOutputs <- Page{
-			BrokenLinks: []BrokenLink{},
-			URL:         pageOpts.PageURL,
-			Depth:       pageOpts.Depth,
-			Error:       err,
-		}
-		return
-	}
-
-	seoData := Seo{}
-
-	if doc.Find("h1").Length() > 0 {
-		seoData.HasH1 = true
-	}
-	if doc.Find("title").Length() > 0 {
-		seoData.HasTitle = true
-		seoData.Title = doc.Find("title").Text()
-	}
-	if doc.Find(`meta[name="description"]`).Length() > 0 {
-		seoData.HasDescription = true
-		seoData.Description = doc.Find(`meta[name="description"]`).AttrOr("content", "")
-	}
-
-	// 3. Ищем битые и рабочие ссылки
-	doc.Find("a").
-		Each(func(i int, s *goquery.Selection) {
-			linkURL := s.AttrOr("href", "")
-			wg.Add(1)
-
-			analyzeLinksJobs <- LinkOptions{
-				pageURL: pageOpts.PageURL,
-				pageIdx: pageOpts.Idx,
-				linkURl: linkURL,
-				Depth:   pageOpts.Depth,
-			}
-		})
-
-		// 4. Формируем отчет
-
-	pageAnalyzeOutputs <- Page{
-		URL:         pageOpts.PageURL,
-		Depth:       pageOpts.Depth,
-		HTTPStatus:  resp.StatusCode,
-		Status:      resp.Status,
-		Error:       nil,
-		BrokenLinks: []BrokenLink{},
-		Seo:         seoData,
-	}
+	return Job{}, false
 }
 
-func finishAnalyze(opts Options, pages map[string]Page, brokenLinks []LinkAnalizeOutput) AnalyzeOutput {
+func (q *Queue) Add(value Job) {
+	q.Mu.Lock()
+	defer q.Mu.Unlock()
+
+	q.M = append(q.M, value)
+}
+
+func finishAnalyze(opts Options, pages map[string]page.Page, brokenLinks []link.LinkAnalyzeOutput) AnalyzeOutput {
 	for _, link := range brokenLinks {
-		currentPage, ok := pages[link.pageURL]
+		currentPage, ok := pages[link.PageURL]
 
 		if !ok {
 			continue
 		}
 
 		currentPage.BrokenLinks = append(
-			currentPage.BrokenLinks, BrokenLink{
-				Url:        link.Url,
+			currentPage.BrokenLinks, page.BrokenLink{
+				URL:        link.URL,
 				StatusCode: link.StatusCode,
 				Error:      link.Error,
 			},
 		)
 
-		pages[link.pageURL] = currentPage
+		pages[link.PageURL] = currentPage
 	}
 
 	output := AnalyzeOutput{
@@ -309,58 +113,212 @@ func finishAnalyze(opts Options, pages map[string]Page, brokenLinks []LinkAnaliz
 
 func worker(
 	ctx context.Context,
-	analyzePageJobs chan PageOptions,
-	pageAnalyzeOutputs chan Page,
-	analyzeLinksJobs chan LinkOptions,
-	linkAnalyzeOutputs chan LinkAnalizeOutput,
+	analyzePageJobs chan page.PageOptions,
+	pageAnalyzeOutputs chan page.Page,
+	analyzeLinksJobs chan link.LinkOptions,
+	linkAnalyzeOutputs chan link.LinkAnalyzeOutput,
 	opts Options,
-	wg *sync.WaitGroup) {
+	wg *sync.WaitGroup,
+	httpFetcher httpclient.HTTPFetch,
+	visitedUrls *VisitedURLs,
+	readyForNextJob chan struct{},
+	analyzeJobsQueue *Queue,
+
+) {
 	for {
 		select {
 		case pageOpts := <-analyzePageJobs:
-			AnalyzePage(ctx, pageOpts, pageAnalyzeOutputs, analyzeLinksJobs, opts, wg)
+			slog.Info("Стартуем анализ страницы")
+			func() {
+				defer wg.Done()
+
+				pageResult := page.AnalyzePage(ctx, pageOpts, httpFetcher)
+				pageAnalyzeOutputs <- pageResult.PageOutput
+
+				for _, linkOpts := range pageResult.Links {
+					wg.Add(1)
+					slog.Info("Ссылка добавлена в очередь работ")
+
+					analyzeJobsQueue.Add(
+						Job{
+							Type:        "link",
+							LinkOptions: link.LinkOptions{PageURL: linkOpts.PageURL, LinkURL: linkOpts.LinkURL, Depth: linkOpts.Depth},
+						},
+					)
+
+				}
+				slog.Info("Анализ страницы завершен")
+			}()
+
 		case linkOpts := <-analyzeLinksJobs:
-			AnalyzeLink(ctx, linkOpts, linkAnalyzeOutputs, analyzePageJobs, opts, wg)
+			slog.Info("Стартуем анализ ссылки")
+			func() {
+				defer wg.Done()
+
+				linkResult := link.AnalyzeLink(ctx, linkOpts, httpFetcher)
+
+				if linkResult.IsUnsupportedLink {
+					return
+				}
+
+				if linkResult.IsBrokenLink {
+					slog.Info("Отчет анализа ссылки отправлен")
+					linkAnalyzeOutputs <- linkResult.LinkAnalyzeOutput
+				}
+
+				if linkResult.IsPage {
+					if _, ok := visitedUrls.Get(linkResult.LinkAnalyzeOutput.URL); !ok &&
+						!linkResult.IsAbs &&
+						linkResult.Depth+1 <= opts.Depth {
+						visitedUrls.Add(linkResult.LinkAnalyzeOutput.URL)
+
+						wg.Add(1)
+
+						analyzeJobsQueue.Add(
+							Job{
+								Type: "page",
+								PageOptions: page.PageOptions{
+									PageURL: linkResult.LinkAnalyzeOutput.URL,
+									Depth:   linkResult.Depth + 1,
+								},
+							},
+						)
+					}
+				}
+
+			}()
+		case <-ctx.Done():
+			return
 		}
+		readyForNextJob <- struct{}{}
 	}
 }
+
 func Analyze(ctx context.Context, opts Options) AnalyzeOutput {
-	visitedUrls = VisitedURLs{
+	fmt.Println(link.ValidateLink(opts.URL))
+	if !link.ValidateLink(opts.URL) {
+		return AnalyzeOutput{
+			RootURL:     opts.URL,
+			Depth:       opts.Depth,
+			GeneratedAt: time.Now().Format(time.RFC3339),
+			Pages: []page.Page{
+				{URL: opts.URL, Depth: 0, Error: errors.New("invalid url")},
+			},
+		}
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+
+	visitedUrls := VisitedURLs{
 		mu: sync.RWMutex{},
 		m:  make(map[string]struct{}),
 	}
 
 	var wg sync.WaitGroup
 
-	done := make(chan struct{})
+	analyzePageJobs := make(chan page.PageOptions)
+	analyzeLinksJobs := make(chan link.LinkOptions)
 
-	analyzePageJobs := make(chan PageOptions)
-	analyzeLinksJobs := make(chan LinkOptions)
+	pageAnalyzeOutputs := make(chan page.Page)
+	linkAnalyzeOutputs := make(chan link.LinkAnalyzeOutput)
 
-	pageAnalyzeOutputs := make(chan Page)
-	linkAnalyzeOutputs := make(chan LinkAnalizeOutput)
+	analyzeJobsQueue := Queue{
+		Mu: sync.RWMutex{},
+		M:  make([]Job, 0),
+	}
 
-	go func() {
-		for w := 0; w <= opts.Concurrency; w++ {
-			go worker(ctx, analyzePageJobs, pageAnalyzeOutputs, analyzeLinksJobs, linkAnalyzeOutputs, opts, &wg)
-		}
-	}()
+	readyForNextJob := make(chan struct{})
 
-	visitedUrls.Add(opts.URL)
-	wg.Add(1)
-	analyzePageJobs <- PageOptions{
-		PageURL: opts.URL,
-		Depth:   0,
-		Idx:     counter.Add(1),
+	timerJob := make(chan struct{})
+	delayFinished := make(chan struct{})
+
+	HTTPFetch := httpclient.CreateHTTPFetch(httpclient.Options{
+		UserAgent:    opts.UserAgent,
+		HTTPClient:   opts.HTTPClient,
+		WaitPauseCh:  delayFinished,
+		StartPauseCh: timerJob,
+		Timeout:      opts.Timeout,
+	})
+
+	for w := 0; w < opts.Concurrency; w++ {
+		go worker(
+			ctx,
+			analyzePageJobs,
+			pageAnalyzeOutputs,
+			analyzeLinksJobs,
+			linkAnalyzeOutputs,
+			opts,
+			&wg,
+			HTTPFetch,
+			&visitedUrls,
+			readyForNextJob,
+			&analyzeJobsQueue,
+		)
 	}
 
 	go func() {
-		wg.Wait()
-		close(done)
+		for {
+			select {
+			case <-readyForNextJob:
+				newJob, ok := analyzeJobsQueue.Shift()
+				if ok {
+					slog.Info("Новая задача на анализ страницы создана")
+					if newJob.Type == "page" {
+						analyzePageJobs <- newJob.PageOptions
+					} else {
+						analyzeLinksJobs <- newJob.LinkOptions
+					}
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
 	}()
 
-	pages := map[string]Page{}
-	brokenLinks := []LinkAnalizeOutput{}
+	go func() {
+		for {
+			select {
+			case <-timerJob:
+				timer := time.NewTimer(opts.Delay)
+
+				select {
+				case <-timer.C:
+					delayFinished <- struct{}{}
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+
+			}
+		}
+	}()
+
+	// стартуем анализ
+	func() {
+		wg.Add(1)
+		visitedUrls.Add(opts.URL)
+
+		analyzeJobsQueue.Add(
+			Job{
+				Type: "page",
+				PageOptions: page.PageOptions{
+					PageURL: opts.URL,
+					Depth:   0,
+				},
+			},
+		)
+		readyForNextJob <- struct{}{}
+		delayFinished <- struct{}{}
+	}()
+
+	go func() {
+		wg.Wait()
+		cancel()
+	}()
+
+	pages := map[string]page.Page{}
+	brokenLinks := []link.LinkAnalyzeOutput{}
 
 	for {
 		select {
@@ -368,13 +326,10 @@ func Analyze(ctx context.Context, opts Options) AnalyzeOutput {
 			pages[data.URL] = data
 		case link := <-linkAnalyzeOutputs:
 			brokenLinks = append(brokenLinks, link)
-		case <-done:
-			return finishAnalyze(opts, pages, brokenLinks)
 		case <-ctx.Done():
 			return finishAnalyze(opts, pages, brokenLinks)
 		}
 	}
-
 }
 
 func (output AnalyzeOutput) Format() []byte {

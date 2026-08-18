@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/urfave/cli/v3"
 )
 
-func AnalyzeCli(customHTTPClient *http.Client) int {
+func AnalyzeCLI(customHTTPClient *http.Client) int {
 	cmd := &cli.Command{
 		Name:            "hexlet-go-crawler",
 		Usage:           "analyze a website structure",
@@ -62,16 +63,26 @@ func AnalyzeCli(customHTTPClient *http.Client) int {
 		},
 
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			url := cmd.StringArg("url")
-
-			if url == "" {
-				return fmt.Errorf("you need to use valid url")
-			}
-
 			HTTPClient := &http.Client{}
 
 			if customHTTPClient != nil {
 				HTTPClient = customHTTPClient
+			}
+
+			timeout, err := time.ParseDuration(cmd.String("timeout"))
+			if err != nil {
+				return fmt.Errorf("invalid timeout value")
+			}
+
+			rps := cmd.Int("rps")
+
+			delay, err := time.ParseDuration(cmd.String("delay"))
+			if err != nil {
+				return fmt.Errorf("invalid delay value")
+			}
+
+			if rps > 0 {
+				delay = time.Second / time.Duration(rps)
 			}
 
 			options := crawler.Options{
@@ -81,8 +92,8 @@ func AnalyzeCli(customHTTPClient *http.Client) int {
 				HTTPClient:  HTTPClient,
 				Concurrency: cmd.Int("workers"),
 				// Retries:    cmd.Int("retries"),
-				// Delay:      cmd.String("delay"),
-				// Timeout:    cmd.String("timeout"),
+				Delay:   delay,
+				Timeout: timeout,
 			}
 
 			result := crawler.Analyze(ctx, options)
@@ -99,5 +110,5 @@ func AnalyzeCli(customHTTPClient *http.Client) int {
 }
 
 func main() {
-	os.Exit(AnalyzeCli(nil))
+	os.Exit(AnalyzeCLI(nil))
 }
