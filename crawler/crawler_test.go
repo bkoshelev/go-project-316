@@ -163,7 +163,6 @@ func TestCrawler_Subtests(t *testing.T) {
 					time.Sleep(200 * time.Millisecond)
 				}))
 				client := server.Client()
-				client.Timeout = 100 * time.Millisecond
 				return server, client
 			},
 			createOptions(func(server *httptest.Server, client *http.Client) Options {
@@ -172,7 +171,7 @@ func TestCrawler_Subtests(t *testing.T) {
 					HTTPClient:  client,
 					Depth:       0,
 					Concurrency: 3,
-					Timeout:     time.Second * 15,
+					Timeout:     time.Millisecond * 100,
 				}
 			}),
 			createWant(func(URL string) AnalyzeOutput {
