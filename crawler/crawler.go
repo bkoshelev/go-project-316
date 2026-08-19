@@ -133,7 +133,12 @@ func worker(
 				defer wg.Done()
 
 				pageResult := page.AnalyzePage(ctx, pageOpts, httpFetcher)
-				pageAnalyzeOutputs <- pageResult.PageOutput
+
+				select {
+				case pageAnalyzeOutputs <- pageResult.PageOutput:
+				case <-ctx.Done():
+					return
+				}
 
 				for _, linkOpts := range pageResult.Links {
 					wg.Add(1)
@@ -190,7 +195,11 @@ func worker(
 		case <-ctx.Done():
 			return
 		}
-		readyForNextJob <- struct{}{}
+		select {
+		case readyForNextJob <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
@@ -238,6 +247,7 @@ func Analyze(ctx context.Context, opts Options) AnalyzeOutput {
 		WaitPauseCh:  delayFinished,
 		StartPauseCh: timerJob,
 		Timeout:      opts.Timeout,
+		Retries:      opts.Retries,
 	})
 
 	for w := 0; w < opts.Concurrency; w++ {

@@ -91,9 +91,9 @@ func AnalyzeCLI(customHTTPClient *http.Client) int {
 				UserAgent:   cmd.String("user-agent"),
 				HTTPClient:  HTTPClient,
 				Concurrency: cmd.Int("workers"),
-				// Retries:    cmd.Int("retries"),
-				Delay:   delay,
-				Timeout: timeout,
+				Retries:     cmd.Int("retries"),
+				Delay:       delay,
+				Timeout:     timeout,
 			}
 
 			result := crawler.Analyze(ctx, options)

@@ -521,6 +521,112 @@ func TestCrawler_Subtests(t *testing.T) {
 				}
 			}),
 		},
+		{
+			"проверяем что retry работает",
+			func() (*httptest.Server, *http.Client) {
+				tryIdx := 0
+				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/":
+						if tryIdx < 2 {
+							http.Error(w, "временная ошибка сервера", http.StatusInternalServerError)
+							tryIdx++
+						} else {
+							data, err := os.ReadFile("../mocks/empty.html")
+							if err != nil {
+								panic("ошибка чтения файла")
+							}
+
+							_, err = w.Write(data)
+							if err != nil {
+								panic("ошибка создания тела ответа")
+							}
+						}
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+
+				return server, server.Client()
+			},
+			createOptions(func(server *httptest.Server, client *http.Client) Options {
+				return Options{
+					URL:         server.URL,
+					HTTPClient:  server.Client(),
+					Depth:       2,
+					Concurrency: 3,
+					Timeout:     time.Second * 15,
+					Retries:     2,
+				}
+			}),
+			createWant(func(URL string) AnalyzeOutput {
+				return AnalyzeOutput{
+					RootURL: URL,
+					Depth:   2,
+					Pages: []page.Page{
+						{
+							URL:         URL,
+							Depth:       0,
+							Error:       nil,
+							HTTPStatus:  200,
+							Status:      "200 OK",
+							BrokenLinks: []page.BrokenLink{},
+							SEO: page.SEO{
+								HasTitle:       false,
+								HasDescription: false,
+								HasH1:          false,
+							},
+						},
+					},
+				}
+			}),
+		},
+		{
+			"проверяем что после двух неудачных попыток запроса в отчете сохраняется ошибка",
+			func() (*httptest.Server, *http.Client) {
+				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/":
+						http.Error(w, "временная ошибка сервера", http.StatusInternalServerError)
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+
+				return server, server.Client()
+			},
+			createOptions(func(server *httptest.Server, client *http.Client) Options {
+				return Options{
+					URL:         server.URL,
+					HTTPClient:  server.Client(),
+					Depth:       2,
+					Concurrency: 3,
+					Timeout:     time.Second * 15,
+					Retries:     2,
+				}
+			}),
+			createWant(func(URL string) AnalyzeOutput {
+				return AnalyzeOutput{
+					RootURL: URL,
+					Depth:   2,
+					Pages: []page.Page{
+						{
+							URL:         URL,
+							Depth:       0,
+							Error:       nil,
+							HTTPStatus:  500,
+							Status:      "500 Internal Server Error",
+							BrokenLinks: []page.BrokenLink{},
+							SEO: page.SEO{
+								HasTitle:       false,
+								HasDescription: false,
+								HasH1:          false,
+							},
+						},
+					},
+				}
+			}),
+		},
 	}
 
 	for _, c := range cases {
@@ -620,5 +726,74 @@ func TestCrawler_WithDelay(t *testing.T) {
 		}
 
 		assert.Truef(t, requestPerSecond <= 4, "превышено количество запросов в секунду")
+	})
+}
+
+// * Проверяем что ручная отмена контекста останавливает повторные запросы
+type contextCanceHTTPClient struct {
+	t testing.TB
+}
+
+func (c *contextCanceHTTPClient) Do(r *http.Request) (*http.Response, error) {
+	var buf bytes.Buffer
+
+	switch r.URL.Path {
+	case "/":
+		select {
+		case <-time.After(200 * time.Millisecond):
+			break
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Status:     "500 Internal Server Error",
+			Body:       io.NopCloser(&buf),
+			Request:    r,
+		}, nil
+	default:
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Status:     "404 OK",
+			Body:       io.NopCloser(&buf),
+			Request:    r,
+		}, nil
+	}
+}
+
+func TestCrawler_RetriesAndContextCancel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+
+		go func() {
+			select {
+			case <-time.After(350 * time.Millisecond):
+				cancel()
+			case <-ctx.Done():
+			}
+
+		}()
+
+		HTTPClient := &contextCanceHTTPClient{t: t}
+
+		got := Analyze(
+			ctx,
+			Options{
+				URL:         "https://test.url/",
+				HTTPClient:  HTTPClient,
+				Depth:       2,
+				Concurrency: 5,
+				Timeout:     time.Second * 15,
+				Delay:       time.Millisecond * 250,
+				Retries:     2,
+			},
+		)
+
+		want := AnalyzeOutput{
+			RootURL: "https://test.url/",
+			Depth:   2,
+			Pages:   []page.Page{},
+		}
+		AssertAnalyzeOutput(t, want, got)
 	})
 }

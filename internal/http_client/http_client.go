@@ -19,6 +19,7 @@ type Options struct {
 	WaitPauseCh  <-chan struct{}
 	StartPauseCh chan<- struct{}
 	Timeout      time.Duration
+	Retries      int
 }
 
 type HTTPFetch struct {
@@ -27,46 +28,66 @@ type HTTPFetch struct {
 	WaitPauseCh  <-chan struct{}
 	StartPauseCh chan<- struct{}
 	Timeout      time.Duration
+	Retries      int
 }
 
 func (h HTTPFetch) MakeRequest(ctx context.Context, URL, method string) (*http.Response, error) {
-	<-h.WaitPauseCh
-	h.StartPauseCh <- struct{}{}
-	defer func() {
-		slog.Info("Запрос выполнен")
+	tryIdx := 0
 
-	}()
-	slog.Info("Новый запрос")
+	for {
+		resp, err := func() (*http.Response, error) {
+			select {
+			case <-h.WaitPauseCh:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 
-	if method != "HEAD" && method != "GET" {
-		return nil, errors.New("неверный тип запроса")
+			h.StartPauseCh <- struct{}{}
+			defer func() {
+				slog.Info("Запрос выполнен")
+
+			}()
+			slog.Info("Новый запрос")
+
+			if method != "HEAD" && method != "GET" {
+				return nil, errors.New("неверный тип запроса")
+			}
+
+			ctx, cancel := context.WithTimeout(ctx, h.Timeout)
+			defer cancel()
+
+			req, err := http.NewRequestWithContext(
+				ctx,
+				method,
+				URL,
+				nil,
+			)
+
+			if err != nil {
+				return nil, fmt.Errorf("ошибка создания запроса: %w", err)
+			}
+
+			if h.UserAgent != "" {
+				req.Header.Set("User-Agent", h.UserAgent)
+			}
+
+			resp, err := h.HTTPClient.Do(req)
+
+			if err != nil {
+				return nil, fmt.Errorf("ошибка выполнения запроса: %w", err)
+			}
+
+			return resp, nil
+		}()
+
+		if (err != nil || (resp.StatusCode >= 500 && resp.StatusCode < 600) || resp.StatusCode == http.StatusTooManyRequests) && tryIdx < h.Retries {
+			tryIdx++
+			continue
+		} else {
+			return resp, err
+		}
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, h.Timeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(
-		ctx,
-		method,
-		URL,
-		nil,
-	)
-
-	if err != nil {
-		return nil, fmt.Errorf("ошибка создания запроса: %w", err)
-	}
-
-	if h.UserAgent != "" {
-		req.Header.Set("User-Agent", h.UserAgent)
-	}
-
-	resp, err := h.HTTPClient.Do(req)
-
-	if err != nil {
-		return nil, fmt.Errorf("ошибка выполнения запроса: %w", err)
-	}
-
-	return resp, nil
 }
 
 func CreateHTTPFetch(options Options) HTTPFetch {
