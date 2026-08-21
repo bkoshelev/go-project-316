@@ -7,9 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"maps"
+	"net/url"
 	"slices"
 	"sync"
 	"time"
@@ -82,23 +82,35 @@ func (q *Queue) Add(value Job) {
 	q.M = append(q.M, value)
 }
 
-func finishAnalyze(opts Options, pages map[string]page.Page, brokenLinks []link.LinkAnalyzeOutput) AnalyzeOutput {
-	for _, link := range brokenLinks {
-		currentPage, ok := pages[link.PageURL]
+type LinksCache struct {
+	PageURLs          []string
+	LinkAnalyzeResult link.LinkAnalyzeResult
+}
 
-		if !ok {
-			continue
+func finishAnalyze(opts Options, pages map[string]page.Page, cachedLinks map[string]LinksCache) AnalyzeOutput {
+
+	for _, link := range cachedLinks {
+		for _, pageURL := range link.PageURLs {
+
+			currentPage, ok := pages[pageURL]
+
+			if !ok {
+				continue
+			}
+
+			switch {
+			case link.LinkAnalyzeResult.IsBrokenLink:
+				currentPage.BrokenLinks = append(
+					currentPage.BrokenLinks, page.BrokenLink(link.LinkAnalyzeResult.LinkAnalyzeOutput),
+				)
+			case link.LinkAnalyzeResult.IsAsset:
+				currentPage.Assets = append(
+					currentPage.Assets, page.Asset(link.LinkAnalyzeResult.AssetAnalyzeOutput),
+				)
+			}
+
+			pages[pageURL] = currentPage
 		}
-
-		currentPage.BrokenLinks = append(
-			currentPage.BrokenLinks, page.BrokenLink{
-				URL:        link.URL,
-				StatusCode: link.StatusCode,
-				Error:      link.Error,
-			},
-		)
-
-		pages[link.PageURL] = currentPage
 	}
 
 	output := AnalyzeOutput{
@@ -116,7 +128,7 @@ func worker(
 	analyzePageJobs chan page.PageOptions,
 	pageAnalyzeOutputs chan page.Page,
 	analyzeLinksJobs chan link.LinkOptions,
-	linkAnalyzeOutputs chan link.LinkAnalyzeOutput,
+	linkAnalyzeResults chan link.LinkAnalyzeResult,
 	opts Options,
 	wg *sync.WaitGroup,
 	httpFetcher httpclient.HTTPFetch,
@@ -132,6 +144,19 @@ func worker(
 			func() {
 				defer wg.Done()
 
+				parsedPageURL, err := url.Parse(pageOpts.PageURL)
+				if err != nil {
+					select {
+					case pageAnalyzeOutputs <- page.Page{
+						URL:   pageOpts.PageURL,
+						Depth: pageOpts.Depth,
+						Error: err,
+					}:
+					case <-ctx.Done():
+						return
+					}
+				}
+
 				pageResult := page.AnalyzePage(ctx, pageOpts, httpFetcher)
 
 				select {
@@ -141,15 +166,38 @@ func worker(
 				}
 
 				for _, linkOpts := range pageResult.Links {
-					wg.Add(1)
-					slog.Info("Ссылка добавлена в очередь работ")
 
-					analyzeJobsQueue.Add(
-						Job{
-							Type:        "link",
-							LinkOptions: link.LinkOptions{PageURL: linkOpts.PageURL, LinkURL: linkOpts.LinkURL, Depth: linkOpts.Depth},
-						},
-					)
+					parsedLink, err := url.Parse(linkOpts.LinkURL)
+					if err != nil {
+						continue
+					}
+
+					if !link.ValidateLink(parsedLink) {
+						continue
+					}
+					if !parsedLink.IsAbs() {
+						parsedLink, err = link.NormalizeLink(linkOpts.LinkURL, linkOpts.PageURL)
+						if err != nil {
+							continue
+						}
+					}
+
+					_, ok := visitedUrls.Get(parsedLink.String())
+					if !ok {
+						visitedUrls.Add(parsedLink.String())
+
+						wg.Add(1)
+						slog.Info("Ссылка добавлена в очередь работ")
+
+						analyzeJobsQueue.Add(
+							Job{
+								Type:        "link",
+								LinkOptions: link.LinkOptions{PageURL: parsedPageURL, LinkURL: parsedLink, Depth: linkOpts.Depth},
+							},
+						)
+					} else {
+						linkAnalyzeResults <- link.LinkAnalyzeResult{URL: parsedLink.String(), PageURL: linkOpts.PageURL}
+					}
 
 				}
 				slog.Info("Анализ страницы завершен")
@@ -166,26 +214,25 @@ func worker(
 					return
 				}
 
+				if linkResult.IsAsset {
+					linkAnalyzeResults <- linkResult
+				}
+
 				if linkResult.IsBrokenLink {
 					slog.Info("Отчет анализа ссылки отправлен")
-					linkAnalyzeOutputs <- linkResult.LinkAnalyzeOutput
+					linkAnalyzeResults <- linkResult
 				}
 
 				if linkResult.IsPage {
-					if _, ok := visitedUrls.Get(linkResult.LinkAnalyzeOutput.URL); !ok &&
-						!linkResult.IsAbs &&
-						linkResult.Depth+1 <= opts.Depth {
-						visitedUrls.Add(linkResult.LinkAnalyzeOutput.URL)
+					if !linkResult.IsExternalHost &&
+						linkResult.PageOptions.Depth <= opts.Depth {
 
 						wg.Add(1)
 
 						analyzeJobsQueue.Add(
 							Job{
-								Type: "page",
-								PageOptions: page.PageOptions{
-									PageURL: linkResult.LinkAnalyzeOutput.URL,
-									Depth:   linkResult.Depth + 1,
-								},
+								Type:        "page",
+								PageOptions: page.PageOptions(linkResult.PageOptions),
 							},
 						)
 					}
@@ -204,8 +251,18 @@ func worker(
 }
 
 func Analyze(ctx context.Context, opts Options) AnalyzeOutput {
-	fmt.Println(link.ValidateLink(opts.URL))
-	if !link.ValidateLink(opts.URL) {
+	parsedLink, err := url.Parse(opts.URL)
+	if err != nil {
+		return AnalyzeOutput{
+			RootURL:     opts.URL,
+			Depth:       opts.Depth,
+			GeneratedAt: time.Now().Format(time.RFC3339),
+			Pages: []page.Page{
+				{URL: opts.URL, Depth: 0, Error: errors.New("invalid url")},
+			},
+		}
+	}
+	if !link.ValidateLink(parsedLink) {
 		return AnalyzeOutput{
 			RootURL:     opts.URL,
 			Depth:       opts.Depth,
@@ -229,7 +286,7 @@ func Analyze(ctx context.Context, opts Options) AnalyzeOutput {
 	analyzeLinksJobs := make(chan link.LinkOptions)
 
 	pageAnalyzeOutputs := make(chan page.Page)
-	linkAnalyzeOutputs := make(chan link.LinkAnalyzeOutput)
+	linkAnalyzeResults := make(chan link.LinkAnalyzeResult)
 
 	analyzeJobsQueue := Queue{
 		Mu: sync.RWMutex{},
@@ -256,7 +313,7 @@ func Analyze(ctx context.Context, opts Options) AnalyzeOutput {
 			analyzePageJobs,
 			pageAnalyzeOutputs,
 			analyzeLinksJobs,
-			linkAnalyzeOutputs,
+			linkAnalyzeResults,
 			opts,
 			&wg,
 			HTTPFetch,
@@ -293,7 +350,11 @@ func Analyze(ctx context.Context, opts Options) AnalyzeOutput {
 
 				select {
 				case <-timer.C:
-					delayFinished <- struct{}{}
+					select {
+					case delayFinished <- struct{}{}:
+					case <-ctx.Done():
+						return
+					}
 				case <-ctx.Done():
 					return
 				}
@@ -328,16 +389,25 @@ func Analyze(ctx context.Context, opts Options) AnalyzeOutput {
 	}()
 
 	pages := map[string]page.Page{}
-	brokenLinks := []link.LinkAnalyzeOutput{}
+	links := map[string]LinksCache{}
 
 	for {
 		select {
-		case data := <-pageAnalyzeOutputs:
-			pages[data.URL] = data
-		case link := <-linkAnalyzeOutputs:
-			brokenLinks = append(brokenLinks, link)
+		case page := <-pageAnalyzeOutputs:
+			pages[page.URL] = page
+		case link := <-linkAnalyzeResults:
+			cachedLink, ok := links[link.URL]
+			if !ok {
+				links[link.URL] = LinksCache{
+					LinkAnalyzeResult: link,
+					PageURLs:          []string{link.PageURL},
+				}
+			} else {
+				cachedLink.PageURLs = append(cachedLink.PageURLs, link.PageURL)
+				links[link.URL] = cachedLink
+			}
 		case <-ctx.Done():
-			return finishAnalyze(opts, pages, brokenLinks)
+			return finishAnalyze(opts, pages, links)
 		}
 	}
 }

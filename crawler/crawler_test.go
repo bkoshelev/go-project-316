@@ -55,6 +55,24 @@ func AssertBrokenLinks(t testing.TB, want, got []page.BrokenLink) {
 	}
 }
 
+func AssertAssets(t testing.TB, want, got []page.Asset) {
+	t.Helper()
+
+	gotByURL := make(map[string]page.Asset, len(got))
+	for _, asset := range got {
+		gotByURL[asset.URL] = asset
+	}
+
+	for _, wantAsset := range want {
+		gotAsset, exists := gotByURL[wantAsset.URL]
+		assert.Truef(t, exists, "asset is missing: %s", wantAsset.URL)
+		assert.Equal(t, wantAsset.StatusCode, gotAsset.StatusCode)
+		assert.Equal(t, wantAsset.Type, gotAsset.Type)
+		assert.Equal(t, wantAsset.SizeBytes, gotAsset.SizeBytes)
+		assertError(t, wantAsset.Error, gotAsset.Error)
+	}
+}
+
 func AssertAnalyzeOutput(t testing.TB, want, got AnalyzeOutput) {
 	t.Helper()
 	assert.Equal(t, want.Depth, got.Depth)
@@ -75,6 +93,7 @@ func AssertAnalyzeOutput(t testing.TB, want, got AnalyzeOutput) {
 		assert.Equal(t, wantPage.SEO, gotPage.SEO)
 		assertError(t, wantPage.Error, gotPage.Error)
 		AssertBrokenLinks(t, wantPage.BrokenLinks, gotPage.BrokenLinks)
+		AssertAssets(t, wantPage.Assets, gotPage.Assets)
 	}
 }
 
@@ -280,7 +299,7 @@ func TestCrawler_Subtests(t *testing.T) {
 							Status:     "200 OK",
 							BrokenLinks: []page.BrokenLink{
 								{URL: URL + "/contacts", StatusCode: 404},
-								{URL: "https://cdn." + parsedURL.Host + "/app.js", Error: errors.New("no such host")},
+								{URL: "https://" + parsedURL.Host + "/app.js", StatusCode: 404},
 							},
 							SEO: page.SEO{
 								HasTitle: true,
@@ -479,7 +498,7 @@ func TestCrawler_Subtests(t *testing.T) {
 							HTTPStatus: 200,
 							Status:     "200 OK",
 							BrokenLinks: []page.BrokenLink{
-								{URL: "https://cdn." + parsedURL.Host + "/app.js", Error: errors.New("no such host")},
+								{URL: "https://" + parsedURL.Host + "/app.js", StatusCode: 404},
 							},
 							SEO: page.SEO{
 								HasTitle:       true,
@@ -621,6 +640,81 @@ func TestCrawler_Subtests(t *testing.T) {
 								HasTitle:       false,
 								HasDescription: false,
 								HasH1:          false,
+							},
+						},
+					},
+				}
+			}),
+		},
+		{
+			"проверяем что данные об ассете успешно сохраняются в отчете (+размер высчитывается из тела ответа)",
+			func() (*httptest.Server, *http.Client) {
+				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/":
+						tmpl, err := template.ParseFiles("../mocks/index.html")
+
+						if err != nil {
+							panic("ошибка чтения html-файла")
+						}
+
+						err = tmpl.Execute(w, map[string]string{
+							"BaseURL": r.Host,
+						})
+
+						if err != nil {
+							panic("ошибка создания тела ответа")
+						}
+					case "/app.js":
+						w.Header().Set("Content-Type", "text/javascript")
+						w.WriteHeader(http.StatusOK)
+
+						_, err := io.WriteString(w, `console.log("fake script");`)
+						if err != nil {
+							t.Errorf("write script response: %v", err)
+						}
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+
+				return server, server.Client()
+			},
+			createOptions(func(server *httptest.Server, client *http.Client) Options {
+				return Options{
+					URL:         server.URL,
+					HTTPClient:  server.Client(),
+					Depth:       0,
+					Concurrency: 3,
+					Timeout:     time.Second * 15,
+				}
+			}),
+			createWant(func(URL string) AnalyzeOutput {
+				parsedURL, err := url.Parse(URL)
+
+				if err != nil {
+					panic("ошибка парсинга")
+				}
+
+				return AnalyzeOutput{
+					RootURL: URL,
+					Depth:   0,
+					Pages: []page.Page{
+						{
+							URL:        URL,
+							Depth:      0,
+							Error:      nil,
+							HTTPStatus: 200,
+							Status:     "200 OK",
+							BrokenLinks: []page.BrokenLink{
+								{URL: URL + "/contacts", StatusCode: 404},
+							},
+							SEO: page.SEO{
+								HasTitle: true,
+								Title:    "Simple Test",
+							},
+							Assets: []page.Asset{
+								{URL: "https://" + parsedURL.Host + "/app.js", Type: "script", StatusCode: 200, SizeBytes: 27, Error: nil},
 							},
 						},
 					},
@@ -795,5 +889,89 @@ func TestCrawler_RetriesAndContextCancel(t *testing.T) {
 			Pages:   []page.Page{},
 		}
 		AssertAnalyzeOutput(t, want, got)
+	})
+}
+
+// * Проверяем что при дублирующихся ассетах на разных страницах повторный запрос не происходит
+type assetHTTPClient struct {
+	t                   testing.TB
+	requestToAssetCount int
+}
+
+func (c *assetHTTPClient) Do(r *http.Request) (*http.Response, error) {
+	var buf bytes.Buffer
+
+	switch r.URL.Path {
+	case "/":
+		tmpl, _ := template.ParseFiles("../mocks/index.html")
+		err := tmpl.Execute(&buf, map[string]string{
+			"BaseURL": r.Host,
+		})
+
+		if err != nil {
+			panic("ошибка чтения html-файла")
+		}
+	case "/contacts":
+		tmpl, _ := template.ParseFiles("../mocks/contacts.html")
+		err := tmpl.Execute(&buf, map[string]string{
+			"BaseURL": r.Host,
+		})
+
+		if err != nil {
+			panic("ошибка чтения html-файла")
+		}
+	case "/about":
+		data, _ := os.ReadFile("../mocks/about.html")
+		buf.Write(data)
+	case "/app.js":
+		c.requestToAssetCount++
+		_, err := io.WriteString(&buf, `console.log("fake script");`)
+		if err != nil {
+			panic(err)
+		}
+
+		return &http.Response{
+			Header:     http.Header{"Content-Type": []string{"text/javascript"}},
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(&buf),
+			Request:    r,
+		}, nil
+	default:
+		return &http.Response{
+			Header:     http.Header{"Content-Type": []string{"text/html"}},
+			StatusCode: http.StatusNotFound,
+			Status:     "404 OK",
+			Body:       io.NopCloser(&buf),
+			Request:    r,
+		}, nil
+	}
+
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html"}},
+		Status:     "200 OK",
+		Body:       io.NopCloser(&buf),
+		Request:    r,
+	}, nil
+}
+
+func TestCrawler_Assets(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		HTTPClient := &assetHTTPClient{t: t}
+
+		Analyze(
+			context.Background(),
+			Options{
+				URL:         "https://test.url/",
+				HTTPClient:  HTTPClient,
+				Depth:       2,
+				Concurrency: 5,
+				Timeout:     time.Second * 15,
+			},
+		)
+
+		assert.Truef(t, HTTPClient.requestToAssetCount == 1, "broken link is missing")
+
 	})
 }

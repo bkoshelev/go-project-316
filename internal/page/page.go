@@ -23,6 +23,7 @@ type Page struct {
 	Error       error        `json:"error" binding:"required"`
 	BrokenLinks []BrokenLink `json:"broken_links" binding:"required"`
 	SEO         SEO          `json:"seo" binding:"required"`
+	Assets      []Asset      `json:"assets" binding:"required"`
 }
 
 type SEO struct {
@@ -47,6 +48,14 @@ type PageOptions struct {
 type PageResult struct {
 	PageOutput Page
 	Links      []LinkOptions
+}
+
+type Asset struct {
+	URL        string `json:"url" binding:"required"`
+	Type       string `json:"type" binding:"required"`
+	StatusCode int    `json:"status_code" binding:"required"`
+	SizeBytes  int64  `json:"size_bytes" binding:"required"`
+	Error      error  `json:"error" binding:"required"`
 }
 
 func AnalyzePage(ctx context.Context,
