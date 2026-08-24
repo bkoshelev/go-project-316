@@ -729,7 +729,7 @@ func TestCrawler_Subtests(t *testing.T) {
 			server, client := c.createHTTPClient()
 			defer server.Close()
 
-			got := AnalyzeJSON(
+			got := AnalyzeToJSONOutput(
 				context.Background(),
 				c.createOptions(server, client),
 			)
@@ -799,7 +799,7 @@ func TestCrawler_WithDelay(t *testing.T) {
 		windowStart := time.Now()
 		windowEnd := windowStart.Add(time.Second)
 
-		AnalyzeJSON(
+		AnalyzeToJSONOutput(
 			context.Background(),
 			Options{
 				URL:         "https://test.url/",
@@ -870,7 +870,7 @@ func TestCrawler_RetriesAndContextCancel(t *testing.T) {
 
 		HTTPClient := &contextCanceHTTPClient{t: t}
 
-		got := AnalyzeJSON(
+		got := AnalyzeToJSONOutput(
 			ctx,
 			Options{
 				URL:         "https://test.url/",
@@ -960,7 +960,7 @@ func TestCrawler_Assets(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		HTTPClient := &assetHTTPClient{t: t}
 
-		AnalyzeJSON(
+		AnalyzeToJSONOutput(
 			context.Background(),
 			Options{
 				URL:         "https://test.url/",

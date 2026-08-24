@@ -135,7 +135,9 @@ func AnalyzePage(ctx context.Context,
 			}}
 	}
 	defer func() {
-		_ = resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			panic("не удалось закрыть тело ответа")
+		}
 	}()
 
 	doc, err := goquery.NewDocumentFromReader(resp.Body)

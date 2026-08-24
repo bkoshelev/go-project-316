@@ -79,7 +79,9 @@ func AnalyzeLink(
 
 	}
 	defer func() {
-		_ = resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			panic("не удалось закрыть тело ответа")
+		}
 	}()
 
 	if resp.StatusCode == http.StatusMethodNotAllowed || resp.ContentLength == -1 {
@@ -96,7 +98,9 @@ func AnalyzeLink(
 			}
 		}
 		defer func() {
-			_ = resp.Body.Close()
+			if err := resp.Body.Close(); err != nil {
+				panic("не удалось закрыть тело ответа")
+			}
 		}()
 	}
 

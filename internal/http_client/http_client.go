@@ -45,7 +45,6 @@ func (h HTTPFetch) MakeRequest(ctx context.Context, URL, method string) (*http.R
 			h.StartPauseCh <- struct{}{}
 			defer func() {
 				slog.Info("Запрос выполнен")
-
 			}()
 			slog.Info("Новый запрос")
 
@@ -81,6 +80,11 @@ func (h HTTPFetch) MakeRequest(ctx context.Context, URL, method string) (*http.R
 		}()
 
 		if (err != nil || (resp.StatusCode >= 500 && resp.StatusCode < 600) || resp.StatusCode == http.StatusTooManyRequests) && tryIdx < h.Retries {
+			if resp != nil {
+				if err := resp.Body.Close(); err != nil {
+					panic("не удалось закрыть тело ответа")
+				}
+			}
 			tryIdx++
 			continue
 		} else {
