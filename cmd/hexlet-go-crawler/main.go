@@ -94,11 +94,16 @@ func AnalyzeCLI(customHTTPClient *http.Client) int {
 				Retries:     cmd.Int("retries"),
 				Delay:       delay,
 				Timeout:     timeout,
+				IndentJSON:  true,
 			}
 
-			result := crawler.Analyze(ctx, options)
+			result, err := crawler.Analyze(ctx, options)
 
-			fmt.Println(string(result.Format()))
+			if err != nil {
+				return err
+			}
+
+			fmt.Println(string(result))
 			return nil
 		},
 	}

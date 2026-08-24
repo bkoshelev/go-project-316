@@ -3,27 +3,64 @@ package page
 import (
 	httpclient "code/internal/http_client"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 )
 
 type BrokenLink struct {
-	URL        string `json:"url" binding:"required"`
-	StatusCode int    `json:"status_code" binding:"required"`
-	Error      error  `json:"error" binding:"required"`
+	URL         string `json:"url" binding:"required"`
+	StatusCode  int    `json:"status_code" binding:"required"`
+	CustomError error  `json:"-"`
+}
+
+// https://medium.com/picus-security-engineering/custom-json-marshaller-in-go-and-common-pitfalls-c43fa774db05
+func (f *BrokenLink) MarshalJSON() ([]byte, error) {
+	type Alias BrokenLink
+	return json.Marshal(&struct {
+		Error string `json:"error"`
+		*Alias
+	}{
+		Error: f.CustomError.Error(),
+		Alias: (*Alias)(f),
+	})
 }
 
 type Page struct {
-	URL         string       `json:"url" binding:"required"`
-	Depth       int          `json:"depth" binding:"required"`
-	HTTPStatus  int          `json:"http_status" binding:"required"`
-	Status      string       `json:"status" binding:"required"`
-	Error       error        `json:"error" binding:"required"`
-	BrokenLinks []BrokenLink `json:"broken_links" binding:"required"`
-	SEO         SEO          `json:"seo" binding:"required"`
-	Assets      []Asset      `json:"assets" binding:"required"`
+	URL          string       `json:"url" binding:"required"`
+	Depth        int          `json:"depth" binding:"required"`
+	HTTPStatus   int          `json:"http_status" binding:"required"`
+	Status       string       `json:"status" binding:"required"`
+	CustomError  error        `json:"-"`
+	BrokenLinks  []BrokenLink `json:"broken_links" binding:"required"`
+	SEO          SEO          `json:"seo" binding:"required"`
+	Assets       []Asset      `json:"assets" binding:"required"`
+	DiscoveredAt string       `json:"discovered_at" binding:"required"`
+}
+
+func (f *Page) MarshalJSON() ([]byte, error) {
+	type Alias Page
+
+	if f.CustomError == nil {
+		return json.Marshal(&struct {
+			Error string `json:"error"`
+			*Alias
+		}{
+			Error: "",
+			Alias: (*Alias)(f),
+		})
+	}
+	return json.Marshal(&struct {
+		Error string `json:"error"`
+		*Alias
+	}{
+		Error: f.CustomError.Error(),
+		Alias: (*Alias)(f),
+	})
 }
 
 type SEO struct {
@@ -55,7 +92,29 @@ type Asset struct {
 	Type       string `json:"type" binding:"required"`
 	StatusCode int    `json:"status_code" binding:"required"`
 	SizeBytes  int64  `json:"size_bytes" binding:"required"`
-	Error      error  `json:"error" binding:"required"`
+	// Error      error  `json:"error" binding:"required"`
+	CustomError error `json:"-"`
+}
+
+func (f *Asset) MarshalJSON() ([]byte, error) {
+	type Alias Asset
+
+	if f.CustomError == nil {
+		return json.Marshal(&struct {
+			Error string `json:"error"`
+			*Alias
+		}{
+			Error: "",
+			Alias: (*Alias)(f),
+		})
+	}
+	return json.Marshal(&struct {
+		Error string `json:"error"`
+		*Alias
+	}{
+		Error: f.CustomError.Error(),
+		Alias: (*Alias)(f),
+	})
 }
 
 func AnalyzePage(ctx context.Context,
@@ -68,10 +127,11 @@ func AnalyzePage(ctx context.Context,
 	if err != nil {
 		return PageResult{
 			PageOutput: Page{
-				BrokenLinks: []BrokenLink{},
-				URL:         pageOpts.PageURL,
-				Depth:       pageOpts.Depth,
-				Error:       err,
+				BrokenLinks:  []BrokenLink{},
+				URL:          pageOpts.PageURL,
+				Depth:        pageOpts.Depth,
+				CustomError:  err,
+				DiscoveredAt: time.Now().UTC().Format(time.RFC3339),
 			}}
 	}
 	defer func() {
@@ -82,10 +142,11 @@ func AnalyzePage(ctx context.Context,
 	if err != nil {
 		return PageResult{
 			PageOutput: Page{
-				BrokenLinks: []BrokenLink{},
-				URL:         pageOpts.PageURL,
-				Depth:       pageOpts.Depth,
-				Error:       err,
+				BrokenLinks:  []BrokenLink{},
+				URL:          pageOpts.PageURL,
+				Depth:        pageOpts.Depth,
+				CustomError:  err,
+				DiscoveredAt: time.Now().UTC().Format(time.RFC3339),
 			}}
 	}
 
@@ -122,13 +183,14 @@ func AnalyzePage(ctx context.Context,
 	// 4. Формируем отчет
 	return PageResult{
 		PageOutput: Page{
-			URL:         pageOpts.PageURL,
-			Depth:       pageOpts.Depth,
-			HTTPStatus:  resp.StatusCode,
-			Status:      resp.Status,
-			Error:       nil,
-			BrokenLinks: []BrokenLink{},
-			SEO:         SEOData,
+			URL:          pageOpts.PageURL,
+			Depth:        pageOpts.Depth,
+			HTTPStatus:   resp.StatusCode,
+			Status:       strings.ToLower(http.StatusText(resp.StatusCode)),
+			CustomError:  nil,
+			BrokenLinks:  []BrokenLink{},
+			SEO:          SEOData,
+			DiscoveredAt: time.Now().UTC().Format(time.RFC3339),
 		},
 		Links: links,
 	}

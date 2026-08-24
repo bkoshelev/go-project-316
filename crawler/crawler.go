@@ -23,8 +23,8 @@ type Options struct {
 	Timeout     time.Duration
 	UserAgent   string
 	Concurrency int
-	// IndentJSON,
-	HTTPClient httpclient.HTTPClient
+	IndentJSON  bool
+	HTTPClient  httpclient.HTTPClient
 }
 
 type Job struct {
@@ -116,7 +116,7 @@ func finishAnalyze(opts Options, pages map[string]page.Page, cachedLinks map[str
 	output := AnalyzeOutput{
 		RootURL:     opts.URL,
 		Depth:       opts.Depth,
-		GeneratedAt: time.Now().Format(time.RFC3339),
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Pages:       slices.Collect(maps.Values(pages)),
 	}
 
@@ -148,9 +148,9 @@ func worker(
 				if err != nil {
 					select {
 					case pageAnalyzeOutputs <- page.Page{
-						URL:   pageOpts.PageURL,
-						Depth: pageOpts.Depth,
-						Error: err,
+						URL:         pageOpts.PageURL,
+						Depth:       pageOpts.Depth,
+						CustomError: err,
 					}:
 					case <-ctx.Done():
 						return
@@ -249,16 +249,28 @@ func worker(
 		}
 	}
 }
+func Analyze(ctx context.Context, opts Options) ([]byte, error) {
+	output := AnalyzeJSON(ctx, opts)
 
-func Analyze(ctx context.Context, opts Options) AnalyzeOutput {
+	if opts.IndentJSON {
+		return output.Format()
+	}
+
+	outputJSON, err := json.Marshal(output)
+	if err != nil {
+		return nil, err
+	}
+	return outputJSON, nil
+}
+func AnalyzeJSON(ctx context.Context, opts Options) AnalyzeOutput {
 	parsedLink, err := url.Parse(opts.URL)
 	if err != nil {
 		return AnalyzeOutput{
 			RootURL:     opts.URL,
 			Depth:       opts.Depth,
-			GeneratedAt: time.Now().Format(time.RFC3339),
+			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 			Pages: []page.Page{
-				{URL: opts.URL, Depth: 0, Error: errors.New("invalid url")},
+				{URL: opts.URL, Depth: 0, CustomError: errors.New("invalid url")},
 			},
 		}
 	}
@@ -266,9 +278,9 @@ func Analyze(ctx context.Context, opts Options) AnalyzeOutput {
 		return AnalyzeOutput{
 			RootURL:     opts.URL,
 			Depth:       opts.Depth,
-			GeneratedAt: time.Now().Format(time.RFC3339),
+			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 			Pages: []page.Page{
-				{URL: opts.URL, Depth: 0, Error: errors.New("invalid url")},
+				{URL: opts.URL, Depth: 0, CustomError: errors.New("invalid url")},
 			},
 		}
 	}
@@ -412,10 +424,10 @@ func Analyze(ctx context.Context, opts Options) AnalyzeOutput {
 	}
 }
 
-func (output AnalyzeOutput) Format() []byte {
+func (output AnalyzeOutput) Format() ([]byte, error) {
 	fmtOutput, err := json.MarshalIndent(output, "", "  ")
 	if err != nil {
-		panic("ошибка форматирования результата")
+		return nil, err
 	}
-	return fmtOutput
+	return fmtOutput, nil
 }

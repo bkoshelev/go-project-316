@@ -2,6 +2,7 @@ package link
 
 import (
 	"context"
+	"errors"
 	"io"
 	"mime"
 	"net/http"
@@ -19,10 +20,9 @@ type LinkOptions struct {
 }
 
 type LinkAnalyzeOutput struct {
-	URL        string
-	StatusCode int
-	Error      error
-	// PageURL    string
+	URL         string
+	StatusCode  int
+	CustomError error
 }
 
 type PageOptions struct {
@@ -44,11 +44,11 @@ type LinkAnalyzeResult struct {
 }
 
 type AssetAnalyzeOutput struct {
-	URL        string
-	Type       string
-	StatusCode int
-	SizeBytes  int64
-	Error      error
+	URL         string
+	Type        string
+	StatusCode  int
+	SizeBytes   int64
+	CustomError error
 }
 
 const (
@@ -73,8 +73,8 @@ func AnalyzeLink(
 			PageURL:      pageURL,
 			IsBrokenLink: true,
 			LinkAnalyzeOutput: LinkAnalyzeOutput{
-				URL:   linkURL,
-				Error: err,
+				URL:         linkURL,
+				CustomError: err,
 			}}
 
 	}
@@ -90,8 +90,8 @@ func AnalyzeLink(
 				PageURL:      pageURL,
 				IsBrokenLink: true,
 				LinkAnalyzeOutput: LinkAnalyzeOutput{
-					URL:   linkURL,
-					Error: err,
+					URL:         linkURL,
+					CustomError: err,
 				},
 			}
 		}
@@ -106,8 +106,9 @@ func AnalyzeLink(
 			PageURL:      pageURL,
 			IsBrokenLink: true,
 			LinkAnalyzeOutput: LinkAnalyzeOutput{
-				URL:        linkURL,
-				StatusCode: resp.StatusCode,
+				URL:         linkURL,
+				StatusCode:  resp.StatusCode,
+				CustomError: errors.New(http.StatusText(resp.StatusCode)),
 			}}
 	}
 
@@ -152,10 +153,10 @@ func AnalyzeLink(
 				URL:     linkURL,
 				IsAsset: true,
 				AssetAnalyzeOutput: AssetAnalyzeOutput{
-					URL:        linkURL,
-					StatusCode: resp.StatusCode,
-					Type:       assetType,
-					Error:      err,
+					URL:         linkURL,
+					StatusCode:  resp.StatusCode,
+					Type:        assetType,
+					CustomError: err,
 				},
 			}
 		}

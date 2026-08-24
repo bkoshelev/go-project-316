@@ -51,7 +51,7 @@ func AssertBrokenLinks(t testing.TB, want, got []page.BrokenLink) {
 		gotLink, exists := gotByURL[wantLink.URL]
 		assert.Truef(t, exists, "broken link is missing: %s", wantLink.URL)
 		assert.Equal(t, wantLink.StatusCode, gotLink.StatusCode)
-		assertError(t, wantLink.Error, gotLink.Error)
+		assertError(t, wantLink.CustomError, gotLink.CustomError)
 	}
 }
 
@@ -69,7 +69,7 @@ func AssertAssets(t testing.TB, want, got []page.Asset) {
 		assert.Equal(t, wantAsset.StatusCode, gotAsset.StatusCode)
 		assert.Equal(t, wantAsset.Type, gotAsset.Type)
 		assert.Equal(t, wantAsset.SizeBytes, gotAsset.SizeBytes)
-		assertError(t, wantAsset.Error, gotAsset.Error)
+		assertError(t, wantAsset.CustomError, gotAsset.CustomError)
 	}
 }
 
@@ -91,7 +91,7 @@ func AssertAnalyzeOutput(t testing.TB, want, got AnalyzeOutput) {
 		assert.Equal(t, wantPage.HTTPStatus, gotPage.HTTPStatus)
 		assert.Equal(t, wantPage.Status, gotPage.Status)
 		assert.Equal(t, wantPage.SEO, gotPage.SEO)
-		assertError(t, wantPage.Error, gotPage.Error)
+		assertError(t, wantPage.CustomError, gotPage.CustomError)
 		AssertBrokenLinks(t, wantPage.BrokenLinks, gotPage.BrokenLinks)
 		AssertAssets(t, wantPage.Assets, gotPage.Assets)
 	}
@@ -134,8 +134,8 @@ func TestCrawler_Subtests(t *testing.T) {
 							URL:         URL,
 							Depth:       0,
 							HTTPStatus:  200,
-							Status:      "200 OK",
-							Error:       nil,
+							Status:      "ok",
+							CustomError: nil,
 							BrokenLinks: []page.BrokenLink{},
 						},
 					},
@@ -168,7 +168,7 @@ func TestCrawler_Subtests(t *testing.T) {
 							URL:         URL,
 							Depth:       0,
 							HTTPStatus:  400,
-							Status:      "400 Bad Request",
+							Status:      "bad request",
 							BrokenLinks: []page.BrokenLink{},
 						},
 					},
@@ -201,7 +201,7 @@ func TestCrawler_Subtests(t *testing.T) {
 						{
 							URL:         URL,
 							Depth:       0,
-							Error:       context.DeadlineExceeded,
+							CustomError: context.DeadlineExceeded,
 							BrokenLinks: []page.BrokenLink{},
 						},
 					},
@@ -236,7 +236,7 @@ func TestCrawler_Subtests(t *testing.T) {
 						{
 							URL:         URL,
 							Depth:       0,
-							Error:       syscall.ECONNREFUSED,
+							CustomError: syscall.ECONNREFUSED,
 							BrokenLinks: []page.BrokenLink{},
 						},
 					},
@@ -249,7 +249,7 @@ func TestCrawler_Subtests(t *testing.T) {
 				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					switch r.URL.Path {
 					case "/", "/about":
-						tmpl, err := template.ParseFiles("../mocks/index.html")
+						tmpl, err := template.ParseFiles("../testdata/fixtures/index.html")
 
 						if err != nil {
 							panic("ошибка чтения html-файла")
@@ -292,14 +292,14 @@ func TestCrawler_Subtests(t *testing.T) {
 					Depth:   0,
 					Pages: []page.Page{
 						{
-							URL:        URL,
-							Depth:      0,
-							Error:      nil,
-							HTTPStatus: 200,
-							Status:     "200 OK",
+							URL:         URL,
+							Depth:       0,
+							CustomError: nil,
+							HTTPStatus:  200,
+							Status:      "ok",
 							BrokenLinks: []page.BrokenLink{
-								{URL: URL + "/contacts", StatusCode: 404},
-								{URL: "https://" + parsedURL.Host + "/app.js", StatusCode: 404},
+								{URL: URL + "/contacts", StatusCode: 404, CustomError: errors.New("Not Found")},
+								{URL: "https://" + parsedURL.Host + "/app.js", StatusCode: 404, CustomError: errors.New("Not Found")},
 							},
 							SEO: page.SEO{
 								HasTitle: true,
@@ -317,66 +317,7 @@ func TestCrawler_Subtests(t *testing.T) {
 
 					switch r.URL.Path {
 					case "/":
-						data, err := os.ReadFile("../mocks/contacts.html")
-						if err != nil {
-							panic("ошибка чтения файла")
-						}
-
-						_, err = w.Write(data)
-						if err != nil {
-							panic("ошибка создания тела ответа")
-						}
-					default:
-						http.NotFound(w, r)
-					}
-				}))
-
-				return server, server.Client()
-			},
-			createOptions(func(server *httptest.Server, client *http.Client) Options {
-				return Options{
-					URL:         server.URL,
-					HTTPClient:  server.Client(),
-					Depth:       0,
-					Concurrency: 3,
-					Timeout:     time.Second * 15,
-				}
-			}),
-			createWant(func(URL string) AnalyzeOutput {
-
-				return AnalyzeOutput{
-					RootURL: URL,
-					Depth:   0,
-					Pages: []page.Page{
-						{
-							URL:        URL,
-							Depth:      0,
-							Error:      nil,
-							HTTPStatus: 200,
-							Status:     "200 OK",
-							BrokenLinks: []page.BrokenLink{
-								{URL: URL + "/about", StatusCode: 404},
-							},
-							SEO: page.SEO{
-								HasTitle:       true,
-								Title:          "Contacts",
-								HasDescription: true,
-								Description:    "Тестовая страница Simple Test & проверка HTML-сущностей",
-								HasH1:          true,
-							},
-						},
-					},
-				}
-			}),
-		},
-		{
-			"проверка на отсутствие seo-данных",
-			func() (*httptest.Server, *http.Client) {
-				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-
-					switch r.URL.Path {
-					case "/":
-						data, err := os.ReadFile("../mocks/empty.html")
+						data, err := os.ReadFile("../testdata/fixtures/contacts.html")
 						if err != nil {
 							panic("ошибка чтения файла")
 						}
@@ -410,9 +351,68 @@ func TestCrawler_Subtests(t *testing.T) {
 						{
 							URL:         URL,
 							Depth:       0,
-							Error:       nil,
+							CustomError: nil,
 							HTTPStatus:  200,
-							Status:      "200 OK",
+							Status:      "ok",
+							BrokenLinks: []page.BrokenLink{
+								{URL: URL + "/about", StatusCode: 404, CustomError: errors.New("Not Found")},
+							},
+							SEO: page.SEO{
+								HasTitle:       true,
+								Title:          "Contacts",
+								HasDescription: true,
+								Description:    "Тестовая страница Simple Test & проверка HTML-сущностей",
+								HasH1:          true,
+							},
+						},
+					},
+				}
+			}),
+		},
+		{
+			"проверка на отсутствие seo-данных",
+			func() (*httptest.Server, *http.Client) {
+				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+					switch r.URL.Path {
+					case "/":
+						data, err := os.ReadFile("../testdata/fixtures/empty.html")
+						if err != nil {
+							panic("ошибка чтения файла")
+						}
+
+						_, err = w.Write(data)
+						if err != nil {
+							panic("ошибка создания тела ответа")
+						}
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+
+				return server, server.Client()
+			},
+			createOptions(func(server *httptest.Server, client *http.Client) Options {
+				return Options{
+					URL:         server.URL,
+					HTTPClient:  server.Client(),
+					Depth:       0,
+					Concurrency: 3,
+					Timeout:     time.Second * 15,
+				}
+			}),
+			createWant(func(URL string) AnalyzeOutput {
+
+				return AnalyzeOutput{
+					RootURL: URL,
+					Depth:   0,
+					Pages: []page.Page{
+						{
+							URL:         URL,
+							Depth:       0,
+							CustomError: nil,
+							HTTPStatus:  200,
+							Status:      "ok",
 							BrokenLinks: []page.BrokenLink{},
 							SEO: page.SEO{
 								HasTitle:       false,
@@ -431,7 +431,7 @@ func TestCrawler_Subtests(t *testing.T) {
 
 					switch r.URL.Path {
 					case "/":
-						tmpl, err := template.ParseFiles("../mocks/index.html")
+						tmpl, err := template.ParseFiles("../testdata/fixtures/index.html")
 
 						if err != nil {
 							panic("ошибка чтения html-файла")
@@ -445,7 +445,7 @@ func TestCrawler_Subtests(t *testing.T) {
 							panic("ошибка создания тела ответа")
 						}
 					case "/contacts":
-						data, err := os.ReadFile("../mocks/contacts.html")
+						data, err := os.ReadFile("../testdata/fixtures/contacts.html")
 						if err != nil {
 							panic("ошибка чтения файла")
 						}
@@ -455,7 +455,7 @@ func TestCrawler_Subtests(t *testing.T) {
 							panic("ошибка создания тела ответа")
 						}
 					case "/about":
-						data, err := os.ReadFile("../mocks/about.html")
+						data, err := os.ReadFile("../testdata/fixtures/about.html")
 						if err != nil {
 							panic("ошибка чтения файла")
 						}
@@ -492,13 +492,13 @@ func TestCrawler_Subtests(t *testing.T) {
 					Depth:   2,
 					Pages: []page.Page{
 						{
-							URL:        URL,
-							Depth:      0,
-							Error:      nil,
-							HTTPStatus: 200,
-							Status:     "200 OK",
+							URL:         URL,
+							Depth:       0,
+							CustomError: nil,
+							HTTPStatus:  200,
+							Status:      "ok",
 							BrokenLinks: []page.BrokenLink{
-								{URL: "https://" + parsedURL.Host + "/app.js", StatusCode: 404},
+								{URL: "https://" + parsedURL.Host + "/app.js", StatusCode: 404, CustomError: errors.New("Not Found")},
 							},
 							SEO: page.SEO{
 								HasTitle:       true,
@@ -510,9 +510,9 @@ func TestCrawler_Subtests(t *testing.T) {
 						{
 							URL:         URL + "/contacts",
 							Depth:       1,
-							Error:       nil,
+							CustomError: nil,
 							HTTPStatus:  200,
-							Status:      "200 OK",
+							Status:      "ok",
 							BrokenLinks: []page.BrokenLink{},
 							SEO: page.SEO{
 								HasTitle:       true,
@@ -525,9 +525,9 @@ func TestCrawler_Subtests(t *testing.T) {
 						{
 							URL:         URL + "/about",
 							Depth:       1,
-							Error:       nil,
+							CustomError: nil,
 							HTTPStatus:  200,
-							Status:      "200 OK",
+							Status:      "ok",
 							BrokenLinks: []page.BrokenLink{},
 							SEO: page.SEO{
 								HasTitle:       true,
@@ -551,7 +551,7 @@ func TestCrawler_Subtests(t *testing.T) {
 							http.Error(w, "временная ошибка сервера", http.StatusInternalServerError)
 							tryIdx++
 						} else {
-							data, err := os.ReadFile("../mocks/empty.html")
+							data, err := os.ReadFile("../testdata/fixtures/empty.html")
 							if err != nil {
 								panic("ошибка чтения файла")
 							}
@@ -586,9 +586,9 @@ func TestCrawler_Subtests(t *testing.T) {
 						{
 							URL:         URL,
 							Depth:       0,
-							Error:       nil,
+							CustomError: nil,
 							HTTPStatus:  200,
-							Status:      "200 OK",
+							Status:      "ok",
 							BrokenLinks: []page.BrokenLink{},
 							SEO: page.SEO{
 								HasTitle:       false,
@@ -632,9 +632,9 @@ func TestCrawler_Subtests(t *testing.T) {
 						{
 							URL:         URL,
 							Depth:       0,
-							Error:       nil,
+							CustomError: nil,
 							HTTPStatus:  500,
-							Status:      "500 Internal Server Error",
+							Status:      "internal server error",
 							BrokenLinks: []page.BrokenLink{},
 							SEO: page.SEO{
 								HasTitle:       false,
@@ -652,7 +652,7 @@ func TestCrawler_Subtests(t *testing.T) {
 				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					switch r.URL.Path {
 					case "/":
-						tmpl, err := template.ParseFiles("../mocks/index.html")
+						tmpl, err := template.ParseFiles("../testdata/fixtures/index.html")
 
 						if err != nil {
 							panic("ошибка чтения html-файла")
@@ -701,20 +701,20 @@ func TestCrawler_Subtests(t *testing.T) {
 					Depth:   0,
 					Pages: []page.Page{
 						{
-							URL:        URL,
-							Depth:      0,
-							Error:      nil,
-							HTTPStatus: 200,
-							Status:     "200 OK",
+							URL:         URL,
+							Depth:       0,
+							CustomError: nil,
+							HTTPStatus:  200,
+							Status:      "ok",
 							BrokenLinks: []page.BrokenLink{
-								{URL: URL + "/contacts", StatusCode: 404},
+								{URL: URL + "/contacts", StatusCode: 404, CustomError: errors.New("Not Found")},
 							},
 							SEO: page.SEO{
 								HasTitle: true,
 								Title:    "Simple Test",
 							},
 							Assets: []page.Asset{
-								{URL: "https://" + parsedURL.Host + "/app.js", Type: "script", StatusCode: 200, SizeBytes: 27, Error: nil},
+								{URL: "https://" + parsedURL.Host + "/app.js", Type: "script", StatusCode: 200, SizeBytes: 27, CustomError: nil},
 							},
 						},
 					},
@@ -729,7 +729,7 @@ func TestCrawler_Subtests(t *testing.T) {
 			server, client := c.createHTTPClient()
 			defer server.Close()
 
-			got := Analyze(
+			got := AnalyzeJSON(
 				context.Background(),
 				c.createOptions(server, client),
 			)
@@ -760,7 +760,7 @@ func (c *recordingHTTPClient) Do(r *http.Request) (*http.Response, error) {
 
 	switch r.URL.Path {
 	case "/":
-		tmpl, _ := template.ParseFiles("../mocks/index.html")
+		tmpl, _ := template.ParseFiles("../testdata/fixtures/index.html")
 		err := tmpl.Execute(&buf, map[string]string{
 			"BaseURL": r.Host,
 		})
@@ -770,11 +770,11 @@ func (c *recordingHTTPClient) Do(r *http.Request) (*http.Response, error) {
 		}
 
 	case "/contacts":
-		data, _ := os.ReadFile("../mocks/contacts.html")
+		data, _ := os.ReadFile("../testdata/fixtures/contacts.html")
 		buf.Write(data)
 
 	case "/about":
-		data, _ := os.ReadFile("../mocks/about.html")
+		data, _ := os.ReadFile("../testdata/fixtures/about.html")
 		buf.Write(data)
 	default:
 		return &http.Response{
@@ -787,7 +787,7 @@ func (c *recordingHTTPClient) Do(r *http.Request) (*http.Response, error) {
 
 	return &http.Response{
 		StatusCode: http.StatusOK,
-		Status:     "200 OK",
+		Status:     "ok",
 		Body:       io.NopCloser(&buf),
 		Request:    r,
 	}, nil
@@ -799,7 +799,7 @@ func TestCrawler_WithDelay(t *testing.T) {
 		windowStart := time.Now()
 		windowEnd := windowStart.Add(time.Second)
 
-		Analyze(
+		AnalyzeJSON(
 			context.Background(),
 			Options{
 				URL:         "https://test.url/",
@@ -870,7 +870,7 @@ func TestCrawler_RetriesAndContextCancel(t *testing.T) {
 
 		HTTPClient := &contextCanceHTTPClient{t: t}
 
-		got := Analyze(
+		got := AnalyzeJSON(
 			ctx,
 			Options{
 				URL:         "https://test.url/",
@@ -903,7 +903,7 @@ func (c *assetHTTPClient) Do(r *http.Request) (*http.Response, error) {
 
 	switch r.URL.Path {
 	case "/":
-		tmpl, _ := template.ParseFiles("../mocks/index.html")
+		tmpl, _ := template.ParseFiles("../testdata/fixtures/index.html")
 		err := tmpl.Execute(&buf, map[string]string{
 			"BaseURL": r.Host,
 		})
@@ -912,7 +912,7 @@ func (c *assetHTTPClient) Do(r *http.Request) (*http.Response, error) {
 			panic("ошибка чтения html-файла")
 		}
 	case "/contacts":
-		tmpl, _ := template.ParseFiles("../mocks/contacts.html")
+		tmpl, _ := template.ParseFiles("../testdata/fixtures/contacts.html")
 		err := tmpl.Execute(&buf, map[string]string{
 			"BaseURL": r.Host,
 		})
@@ -921,7 +921,7 @@ func (c *assetHTTPClient) Do(r *http.Request) (*http.Response, error) {
 			panic("ошибка чтения html-файла")
 		}
 	case "/about":
-		data, _ := os.ReadFile("../mocks/about.html")
+		data, _ := os.ReadFile("../testdata/fixtures/about.html")
 		buf.Write(data)
 	case "/app.js":
 		c.requestToAssetCount++
@@ -933,7 +933,7 @@ func (c *assetHTTPClient) Do(r *http.Request) (*http.Response, error) {
 		return &http.Response{
 			Header:     http.Header{"Content-Type": []string{"text/javascript"}},
 			StatusCode: http.StatusOK,
-			Status:     "200 OK",
+			Status:     "ok",
 			Body:       io.NopCloser(&buf),
 			Request:    r,
 		}, nil
@@ -950,7 +950,7 @@ func (c *assetHTTPClient) Do(r *http.Request) (*http.Response, error) {
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"text/html"}},
-		Status:     "200 OK",
+		Status:     "ok",
 		Body:       io.NopCloser(&buf),
 		Request:    r,
 	}, nil
@@ -960,7 +960,7 @@ func TestCrawler_Assets(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		HTTPClient := &assetHTTPClient{t: t}
 
-		Analyze(
+		AnalyzeJSON(
 			context.Background(),
 			Options{
 				URL:         "https://test.url/",
@@ -973,5 +973,79 @@ func TestCrawler_Assets(t *testing.T) {
 
 		assert.Truef(t, HTTPClient.requestToAssetCount == 1, "broken link is missing")
 
+	})
+}
+
+// * Проверяем что конечный результат - вывод в консоль - сопадает с эталоном
+type output1HTTPClient struct{}
+
+func (c output1HTTPClient) Do(request *http.Request) (*http.Response, error) {
+	switch request.URL.Path {
+	case "":
+		input, err := os.ReadFile("../testdata/fixtures/input_1.html")
+		if err != nil {
+			return &http.Response{}, err
+		}
+
+		return &http.Response{
+			Header:        http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+			StatusCode:    http.StatusOK,
+			Status:        "ok",
+			ContentLength: int64(len(input)),
+			Body:          io.NopCloser(bytes.NewReader(input)),
+			Request:       request,
+		}, nil
+	case "/missing":
+		return &http.Response{
+			Header:        http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+			StatusCode:    http.StatusNotFound,
+			Status:        "404 Not Found",
+			ContentLength: int64(len("Not Found")),
+			Body:          io.NopCloser(bytes.NewBufferString("Not Found")),
+			Request:       request,
+		}, nil
+	case "/static/logo.png":
+		logo, err := os.ReadFile("../testdata/fixtures/logo_1.png")
+		if err != nil {
+			return &http.Response{}, err
+		}
+
+		return &http.Response{
+			Header:        http.Header{"Content-Type": []string{"image/png"}},
+			StatusCode:    http.StatusOK,
+			Status:        "ok",
+			ContentLength: int64(len(logo)),
+			Body:          io.NopCloser(bytes.NewReader(logo)),
+			Request:       request,
+		}, nil
+	default:
+		return nil, errors.New("unexpected URL: " + request.URL.String())
+	}
+}
+
+func TestAnalyze_Output(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		got, err := Analyze(
+			context.Background(),
+			Options{
+				URL:         "https://example.com",
+				Depth:       1,
+				IndentJSON:  true,
+				HTTPClient:  output1HTTPClient{},
+				Concurrency: 1,
+				Timeout:     time.Second,
+			},
+		)
+
+		if err != nil {
+			panic("ошибка вызова")
+		}
+
+		want, err := os.ReadFile("../testdata/fixtures/output_1.txt")
+		if err != nil {
+			panic("ошибка чтения файла")
+		}
+
+		assert.JSONEq(t, string(want), string(got))
 	})
 }
