@@ -1,7 +1,7 @@
 package crawler
 
 import (
-	httpclient "code/internal/http_client"
+	"code/internal/fetcher"
 	"code/internal/link"
 	"code/internal/page"
 	"context"
@@ -25,7 +25,7 @@ type Options struct {
 	UserAgent   string
 	Concurrency int
 	IndentJSON  bool
-	HTTPClient  httpclient.HTTPClient
+	HTTPClient  fetcher.HTTPClient
 }
 
 type Job struct {
@@ -40,32 +40,15 @@ type AnalyzeOutput struct {
 	Pages       []page.Page `json:"pages" binding:"required"`
 }
 
-type VisitedURLs struct {
-	mu sync.RWMutex
-	m  map[string]struct{}
-}
-
-func (v *VisitedURLs) Get(key string) (struct{}, bool) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	val, ok := v.m[key]
-	return val, ok
-}
-
-func (c *VisitedURLs) Add(value string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.m[value] = struct{}{}
-}
-
 type Queue struct {
-	Mu sync.RWMutex
-	M  []Job
+	Mu      sync.RWMutex
+	M       []Job
+	Crawler *Crawler
 }
 
 func (q *Queue) Shift() (Job, bool) {
-	q.Mu.RLock()
-	defer q.Mu.RUnlock()
+	q.Mu.Lock()
+	defer q.Mu.Unlock()
 
 	if len(q.M) > 0 {
 		val := q.M[0]
@@ -81,6 +64,18 @@ func (q *Queue) Add(value Job) {
 	defer q.Mu.Unlock()
 
 	q.M = append(q.M, value)
+
+	select {
+	case q.Crawler.Channels.newJobReadyForAnalyze <- struct{}{}:
+	default:
+	}
+}
+
+func (q *Queue) IsEmpty() bool {
+	q.Mu.RLock()
+	defer q.Mu.RUnlock()
+
+	return len(q.M) == 0
 }
 
 type LinksCache struct {
@@ -88,7 +83,16 @@ type LinksCache struct {
 	LinkAnalyzeResult link.LinkAnalyzeResult
 }
 
-func (c Cache) AddLink(link link.LinkAnalyzeResult) {
+type Cache struct {
+	Mu    sync.RWMutex
+	links map[string]LinksCache
+	pages map[string]page.Page
+}
+
+func (c *Cache) AddLink(link link.LinkAnalyzeResult) {
+	c.Mu.Lock()
+	defer c.Mu.Unlock()
+
 	cachedLink, ok := c.links[link.URL]
 	if !ok {
 		c.links[link.URL] = LinksCache{
@@ -96,28 +100,45 @@ func (c Cache) AddLink(link link.LinkAnalyzeResult) {
 			PageURLs:          []string{link.PageURL},
 		}
 	} else {
+		cachedLink.LinkAnalyzeResult = link
+		c.links[link.URL] = cachedLink
+	}
+}
+
+func (c *Cache) UpdateLinkPageURLs(link link.LinkAnalyzeResult) {
+	c.Mu.Lock()
+	defer c.Mu.Unlock()
+
+	cachedLink, ok := c.links[link.URL]
+	if !ok {
+		c.links[link.URL] = LinksCache{
+			PageURLs: []string{link.PageURL},
+		}
+	} else {
 		cachedLink.PageURLs = append(cachedLink.PageURLs, link.PageURL)
 		c.links[link.URL] = cachedLink
 	}
 }
 
-func (c Cache) AddPage(page page.Page) {
+func (c *Cache) isLinkWasVisited(key string) bool {
+	c.Mu.RLock()
+	defer c.Mu.RUnlock()
+	_, ok := c.links[key]
+	return ok
+}
+
+func (c *Cache) AddPage(page page.Page) {
+	c.Mu.Lock()
+	defer c.Mu.Unlock()
+
 	c.pages[page.URL] = page
 }
 
-type Cache struct {
-	links map[string]LinksCache
-	pages map[string]page.Page
-}
-
 type Channels struct {
-	readyForNextJob    chan struct{}
-	delayFinished      chan struct{}
-	timerJob           chan struct{}
-	analyzePageJobs    chan page.PageOptions
-	analyzeLinksJobs   chan link.LinkOptions
-	pageAnalyzeOutputs chan page.Page
-	linkAnalyzeResults chan link.LinkAnalyzeResult
+	delayFinished         chan struct{}
+	timerJob              chan struct{}
+	analyzeJobs           chan Job
+	newJobReadyForAnalyze chan struct{}
 }
 
 type Crawler struct {
@@ -129,11 +150,10 @@ type Crawler struct {
 	UserAgent        string
 	Concurrency      int
 	IndentJSON       bool
-	HTTPClient       httpclient.HTTPClient
-	VisitedUrls      VisitedURLs
-	HTTPFetch        httpclient.HTTPFetch
+	HTTPClient       fetcher.HTTPClient
+	HTTPFetch        fetcher.HTTPFetch
 	Channels         Channels
-	analyzeJobsQueue *Queue
+	AnalyzeJobsQueue *Queue
 	ctx              context.Context
 	cancel           context.CancelFunc
 	wg               *sync.WaitGroup
@@ -141,7 +161,6 @@ type Crawler struct {
 }
 
 func (c *Crawler) createOutput() AnalyzeOutput {
-
 	for _, link := range c.cache.links {
 		for _, pageURL := range link.PageURLs {
 
@@ -181,110 +200,100 @@ func worker(
 ) {
 	for {
 		select {
-		case pageOpts := <-c.Channels.analyzePageJobs:
-			slog.Info("Стартуем анализ страницы")
-			func() {
-				defer c.wg.Done()
+		case newJob := <-c.Channels.analyzeJobs:
+			switch newJob.Type {
+			case "page":
+				pageOpts := newJob.PageOptions
+				slog.Info("Стартуем анализ страницы")
+				func() {
+					defer c.wg.Done()
 
-				parsedPageURL, err := url.Parse(pageOpts.PageURL)
-				if err != nil {
-					select {
-					case c.Channels.pageAnalyzeOutputs <- page.Page{
-						URL:         pageOpts.PageURL,
-						Depth:       pageOpts.Depth,
-						CustomError: err,
-					}:
-					case <-c.ctx.Done():
+					parsedPageURL, err := url.Parse(pageOpts.PageURL)
+					if err != nil {
+						c.cache.AddPage(page.Page{
+							URL:         pageOpts.PageURL,
+							Depth:       pageOpts.Depth,
+							CustomError: err,
+						})
 						return
 					}
-				}
 
-				pageResult := page.AnalyzePage(c.ctx, pageOpts, c.HTTPFetch)
+					pageResult := page.AnalyzePage(c.ctx, pageOpts, c.HTTPFetch)
+					c.cache.AddPage(pageResult.PageOutput)
 
-				select {
-				case c.Channels.pageAnalyzeOutputs <- pageResult.PageOutput:
-				case <-c.ctx.Done():
-					return
-				}
+					for _, linkOpts := range pageResult.Links {
 
-				for _, linkOpts := range pageResult.Links {
-
-					parsedLink, err := url.Parse(linkOpts.LinkURL)
-					if err != nil {
-						continue
-					}
-
-					if !link.ValidateLink(parsedLink) {
-						continue
-					}
-					if !parsedLink.IsAbs() {
-						parsedLink, err = link.NormalizeLink(linkOpts.LinkURL, linkOpts.PageURL)
+						parsedLink, err := url.Parse(linkOpts.LinkURL)
 						if err != nil {
 							continue
 						}
+
+						if !link.ValidateLink(parsedLink) {
+							continue
+						}
+						if !parsedLink.IsAbs() {
+							parsedLink, err = link.NormalizeLink(linkOpts.LinkURL, linkOpts.PageURL)
+							if err != nil {
+								continue
+							}
+						}
+
+						if !c.cache.isLinkWasVisited(parsedLink.String()) {
+
+							c.wg.Add(1)
+							slog.Info("Ссылка добавлена в очередь работ")
+
+							c.AnalyzeJobsQueue.Add(
+								Job{
+									Type:        "link",
+									LinkOptions: link.LinkOptions{PageURL: parsedPageURL, LinkURL: parsedLink, Depth: linkOpts.Depth},
+								},
+							)
+						}
+						c.cache.UpdateLinkPageURLs(link.LinkAnalyzeResult{URL: parsedLink.String(), PageURL: linkOpts.PageURL})
+
+					}
+					slog.Info("Анализ страницы завершен")
+				}()
+			case "link":
+				linkOpts := newJob.LinkOptions
+				slog.Info("Стартуем анализ ссылки")
+				func() {
+					defer c.wg.Done()
+
+					linkResult := link.AnalyzeLink(c.ctx, linkOpts, c.HTTPFetch)
+
+					if linkResult.IsUnsupportedLink {
+						return
 					}
 
-					_, ok := c.VisitedUrls.Get(parsedLink.String())
-					if !ok {
-						c.VisitedUrls.Add(parsedLink.String())
-
-						c.wg.Add(1)
-						slog.Info("Ссылка добавлена в очередь работ")
-
-						c.analyzeJobsQueue.Add(
-							Job{
-								Type:        "link",
-								LinkOptions: link.LinkOptions{PageURL: parsedPageURL, LinkURL: parsedLink, Depth: linkOpts.Depth},
-							},
-						)
-					} else {
-						c.Channels.linkAnalyzeResults <- link.LinkAnalyzeResult{URL: parsedLink.String(), PageURL: linkOpts.PageURL}
+					if linkResult.IsAsset {
+						c.cache.AddLink(linkResult)
+						return
 					}
 
-				}
-				slog.Info("Анализ страницы завершен")
-			}()
-
-		case linkOpts := <-c.Channels.analyzeLinksJobs:
-			slog.Info("Стартуем анализ ссылки")
-			func() {
-				defer c.wg.Done()
-
-				linkResult := link.AnalyzeLink(c.ctx, linkOpts, c.HTTPFetch)
-
-				if linkResult.IsUnsupportedLink {
-					return
-				}
-
-				if linkResult.IsAsset {
-					c.Channels.linkAnalyzeResults <- linkResult
-				}
-
-				if linkResult.IsBrokenLink {
-					slog.Info("Отчет анализа ссылки отправлен")
-					c.Channels.linkAnalyzeResults <- linkResult
-				}
-
-				if linkResult.IsPage {
-					if !linkResult.IsExternalHost &&
-						linkResult.PageOptions.Depth <= c.Depth {
-						c.wg.Add(1)
-
-						c.analyzeJobsQueue.Add(
-							Job{
-								Type:        "page",
-								PageOptions: page.PageOptions(linkResult.PageOptions),
-							},
-						)
+					if linkResult.IsBrokenLink {
+						slog.Info("Отчет анализа ссылки отправлен")
+						c.cache.AddLink(linkResult)
+						return
 					}
-				}
 
-			}()
-		case <-c.ctx.Done():
-			return
-		}
-		select {
-		case c.Channels.readyForNextJob <- struct{}{}:
+					if linkResult.IsPage {
+						if !linkResult.IsExternalHost &&
+							linkResult.PageOptions.Depth <= c.Depth {
+							c.wg.Add(1)
+
+							c.AnalyzeJobsQueue.Add(
+								Job{
+									Type:        "page",
+									PageOptions: page.PageOptions(linkResult.PageOptions),
+								},
+							)
+						}
+					}
+
+				}()
+			}
 		case <-c.ctx.Done():
 			return
 		}
@@ -300,17 +309,14 @@ func createNewCrawler(ctx context.Context, opts Options) *Crawler {
 		Delay:      opts.Delay,
 		UserAgent:  opts.UserAgent,
 		IndentJSON: opts.IndentJSON,
-		VisitedUrls: VisitedURLs{
-			mu: sync.RWMutex{},
-			m:  make(map[string]struct{}),
-		},
-		ctx:    ctx,
-		cancel: cancel,
-		wg:     &sync.WaitGroup{},
-		analyzeJobsQueue: &Queue{
-			Mu: sync.RWMutex{},
-			M:  make([]Job, 0),
-		},
+		ctx:        ctx,
+		cancel:     cancel,
+		wg:         &sync.WaitGroup{},
+	}
+
+	crawler.AnalyzeJobsQueue = &Queue{
+		M:       make([]Job, 0),
+		Crawler: &crawler,
 	}
 
 	if opts.Depth < 0 {
@@ -338,13 +344,10 @@ func createNewCrawler(ctx context.Context, opts Options) *Crawler {
 	}
 
 	crawler.Channels = Channels{
-		readyForNextJob:    make(chan struct{}),
-		timerJob:           make(chan struct{}),
-		delayFinished:      make(chan struct{}),
-		analyzePageJobs:    make(chan page.PageOptions),
-		analyzeLinksJobs:   make(chan link.LinkOptions),
-		pageAnalyzeOutputs: make(chan page.Page),
-		linkAnalyzeResults: make(chan link.LinkAnalyzeResult),
+		timerJob:              make(chan struct{}),
+		delayFinished:         make(chan struct{}),
+		analyzeJobs:           make(chan Job, crawler.Concurrency),
+		newJobReadyForAnalyze: make(chan struct{}, 1),
 	}
 
 	crawler.cache = Cache{
@@ -352,7 +355,7 @@ func createNewCrawler(ctx context.Context, opts Options) *Crawler {
 		pages: map[string]page.Page{},
 	}
 
-	crawler.HTTPFetch = httpclient.CreateHTTPFetch(httpclient.Options{
+	crawler.HTTPFetch = fetcher.CreateHTTPFetch(fetcher.Options{
 		UserAgent:    crawler.UserAgent,
 		HTTPClient:   crawler.HTTPClient,
 		WaitPauseCh:  crawler.Channels.delayFinished,
@@ -390,21 +393,26 @@ func (c *Crawler) validateOptions() (AnalyzeOutput, bool) {
 
 func (c *Crawler) prepareAnalyze() {
 	go func() {
+
 		for {
 			select {
-			case <-c.Channels.readyForNextJob:
-				newJob, ok := c.analyzeJobsQueue.Shift()
-				if ok {
-					slog.Info("Новая задача на анализ страницы создана")
-					switch newJob.Type {
-					case "page":
-						c.Channels.analyzePageJobs <- newJob.PageOptions
-					case "link":
-						c.Channels.analyzeLinksJobs <- newJob.LinkOptions
-					}
-				}
+			case <-c.Channels.newJobReadyForAnalyze:
 			case <-c.ctx.Done():
 				return
+			}
+
+			for {
+				newJob, ok := c.AnalyzeJobsQueue.Shift()
+				if !ok {
+					break
+				}
+
+				select {
+				case <-c.ctx.Done():
+					return
+				case c.Channels.analyzeJobs <- newJob:
+					continue
+				}
 			}
 		}
 	}()
@@ -444,9 +452,9 @@ func (c *Crawler) createWorkers() {
 func (c *Crawler) startAnalyze() {
 	// стартуем анализ
 	c.wg.Add(1)
-	c.VisitedUrls.Add(c.URL)
+	c.cache.UpdateLinkPageURLs(link.LinkAnalyzeResult{URL: c.URL, PageURL: ""})
 
-	c.analyzeJobsQueue.Add(
+	c.AnalyzeJobsQueue.Add(
 		Job{
 			Type: "page",
 			PageOptions: page.PageOptions{
@@ -455,14 +463,8 @@ func (c *Crawler) startAnalyze() {
 			},
 		},
 	)
-	c.Channels.readyForNextJob <- struct{}{}
+
 	c.Channels.delayFinished <- struct{}{}
-
-	go func() {
-		c.wg.Wait()
-		c.cancel()
-	}()
-
 }
 
 func (output AnalyzeOutput) Format(indentJSON bool) ([]byte, error) {
@@ -493,16 +495,9 @@ func AnalyzeToJSONOutput(ctx context.Context, opts Options) AnalyzeOutput {
 	crawler.createWorkers()
 	crawler.startAnalyze()
 
-	for {
-		select {
-		case page := <-crawler.Channels.pageAnalyzeOutputs:
-			crawler.cache.AddPage(page)
-		case link := <-crawler.Channels.linkAnalyzeResults:
-			crawler.cache.AddLink(link)
-		case <-crawler.ctx.Done():
-			return crawler.createOutput()
-		}
-	}
+	crawler.wg.Wait()
+	crawler.cancel()
+	return crawler.createOutput()
 }
 
 func Analyze(ctx context.Context, opts Options) ([]byte, error) {

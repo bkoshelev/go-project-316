@@ -11,7 +11,7 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-func AnalyzeCLI(customHTTPClient *http.Client) int {
+func AnalyzeCLI(customHTTPClient *http.Client, args []string) int {
 	cmd := &cli.Command{
 		Name:            "hexlet-go-crawler",
 		Usage:           "analyze a website structure",
@@ -108,12 +108,13 @@ func AnalyzeCLI(customHTTPClient *http.Client) int {
 		},
 	}
 
-	if err := cmd.Run(context.Background(), os.Args); err != nil {
-		fmt.Println(err)
+	if err := cmd.Run(context.Background(), args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
 	}
 	return 0
 }
 
 func main() {
-	os.Exit(AnalyzeCLI(nil))
+	os.Exit(AnalyzeCLI(nil, os.Args))
 }

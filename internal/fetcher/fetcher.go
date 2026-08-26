@@ -1,4 +1,4 @@
-package httpclient
+package fetcher
 
 import (
 	"context"
@@ -43,17 +43,15 @@ func (h HTTPFetch) MakeRequest(ctx context.Context, URL, method string) (*http.R
 			}
 
 			h.StartPauseCh <- struct{}{}
+
 			defer func() {
 				slog.Info("Запрос выполнен")
 			}()
 			slog.Info("Новый запрос")
 
-			if method != "HEAD" && method != "GET" {
+			if method != http.MethodHead && method != http.MethodGet {
 				return nil, errors.New("неверный тип запроса")
 			}
-
-			ctx, cancel := context.WithTimeout(ctx, h.Timeout)
-			defer cancel()
 
 			req, err := http.NewRequestWithContext(
 				ctx,
@@ -79,7 +77,9 @@ func (h HTTPFetch) MakeRequest(ctx context.Context, URL, method string) (*http.R
 			return resp, nil
 		}()
 
-		if (err != nil || (resp.StatusCode >= 500 && resp.StatusCode < 600) || resp.StatusCode == http.StatusTooManyRequests) && tryIdx < h.Retries {
+		isServerError := resp != nil && resp.StatusCode >= http.StatusInternalServerError && resp.StatusCode < http.StatusNetworkAuthenticationRequired
+		wasTooManyRequests := resp != nil && resp.StatusCode == http.StatusTooManyRequests
+		if (err != nil || isServerError || wasTooManyRequests) && tryIdx < h.Retries {
 			if resp != nil {
 				if err := resp.Body.Close(); err != nil {
 					panic("не удалось закрыть тело ответа")

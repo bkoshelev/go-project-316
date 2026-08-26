@@ -168,7 +168,7 @@ func TestCrawler_Subtests(t *testing.T) {
 							URL:         URL,
 							Depth:       0,
 							HTTPStatus:  400,
-							Status:      "bad request",
+							Status:      "error",
 							BrokenLinks: []page.BrokenLink{},
 						},
 					},
@@ -203,6 +203,7 @@ func TestCrawler_Subtests(t *testing.T) {
 							Depth:       0,
 							CustomError: context.DeadlineExceeded,
 							BrokenLinks: []page.BrokenLink{},
+							Status:      "error",
 						},
 					},
 				}
@@ -238,6 +239,7 @@ func TestCrawler_Subtests(t *testing.T) {
 							Depth:       0,
 							CustomError: syscall.ECONNREFUSED,
 							BrokenLinks: []page.BrokenLink{},
+							Status:      "error",
 						},
 					},
 				}
@@ -634,7 +636,7 @@ func TestCrawler_Subtests(t *testing.T) {
 							Depth:       0,
 							CustomError: nil,
 							HTTPStatus:  500,
-							Status:      "internal server error",
+							Status:      "error",
 							BrokenLinks: []page.BrokenLink{},
 							SEO: page.SEO{
 								HasTitle:       false,

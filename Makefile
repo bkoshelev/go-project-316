@@ -5,7 +5,7 @@ test:
 # запустить конкретный тест:
 # go test -race -run 'TestCrawler_WithDelay' -count=1 ./crawler -v
 run:
-	bin/hexlet-go-crawler $(URL)
+	go run cmd/hexlet-go-crawler/main.go $(URL)
 lint:
 	golangci-lint run
 lint-fix:

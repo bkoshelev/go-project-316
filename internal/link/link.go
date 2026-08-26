@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"strings"
 
-	httpclient "code/internal/http_client"
+	"code/internal/fetcher"
 	"code/internal/page"
 )
 
@@ -61,8 +61,11 @@ const (
 func AnalyzeLink(
 	ctx context.Context,
 	linkOptions LinkOptions,
-	httpFetcher httpclient.HTTPFetch,
+	httpFetcher fetcher.HTTPFetch,
 ) LinkAnalyzeResult {
+	ctx, cancel := context.WithTimeout(ctx, httpFetcher.Timeout)
+	defer cancel()
+
 	linkURL := linkOptions.LinkURL.String()
 	pageURL := linkOptions.PageURL.String()
 
@@ -104,7 +107,7 @@ func AnalyzeLink(
 		}()
 	}
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode >= http.StatusBadRequest {
 		return LinkAnalyzeResult{
 			URL:          linkURL,
 			PageURL:      pageURL,

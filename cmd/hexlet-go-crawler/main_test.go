@@ -15,7 +15,7 @@ func TestAppCanHandleServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	code := AnalyzeCLI(server.Client())
+	code := AnalyzeCLI(server.Client(), []string{server.URL})
 
 	assert.Equal(t, 0, code)
 }

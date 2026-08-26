@@ -1,12 +1,11 @@
 package page
 
 import (
-	httpclient "code/internal/http_client"
+	"code/internal/fetcher"
 	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -88,12 +87,11 @@ type PageResult struct {
 }
 
 type Asset struct {
-	URL        string `json:"url" binding:"required"`
-	Type       string `json:"type" binding:"required"`
-	StatusCode int    `json:"status_code" binding:"required"`
-	SizeBytes  int64  `json:"size_bytes" binding:"required"`
-	// Error      error  `json:"error" binding:"required"`
-	CustomError error `json:"-"`
+	URL         string `json:"url" binding:"required"`
+	Type        string `json:"type" binding:"required"`
+	StatusCode  int    `json:"status_code" binding:"required"`
+	SizeBytes   int64  `json:"size_bytes" binding:"required"`
+	CustomError error  `json:"-"`
 }
 
 func (f *Asset) MarshalJSON() ([]byte, error) {
@@ -119,8 +117,11 @@ func (f *Asset) MarshalJSON() ([]byte, error) {
 
 func AnalyzePage(ctx context.Context,
 	pageOpts PageOptions,
-	httpFetcher httpclient.HTTPFetch,
+	httpFetcher fetcher.HTTPFetch,
 ) PageResult {
+	ctx, cancel := context.WithTimeout(ctx, httpFetcher.Timeout)
+	defer cancel()
+
 	// 1. Получаем тело страницы
 	resp, err := httpFetcher.MakeRequest(ctx, pageOpts.PageURL, http.MethodGet)
 
@@ -132,6 +133,7 @@ func AnalyzePage(ctx context.Context,
 				Depth:        pageOpts.Depth,
 				CustomError:  err,
 				DiscoveredAt: time.Now().UTC().Format(time.RFC3339),
+				Status:       "error",
 			}}
 	}
 	defer func() {
@@ -141,7 +143,7 @@ func AnalyzePage(ctx context.Context,
 	}()
 
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
+	if err != nil || resp.StatusCode >= http.StatusBadRequest {
 		return PageResult{
 			PageOutput: Page{
 				BrokenLinks:  []BrokenLink{},
@@ -149,6 +151,8 @@ func AnalyzePage(ctx context.Context,
 				Depth:        pageOpts.Depth,
 				CustomError:  err,
 				DiscoveredAt: time.Now().UTC().Format(time.RFC3339),
+				Status:       "error",
+				HTTPStatus:   resp.StatusCode,
 			}}
 	}
 
@@ -188,7 +192,7 @@ func AnalyzePage(ctx context.Context,
 			URL:          pageOpts.PageURL,
 			Depth:        pageOpts.Depth,
 			HTTPStatus:   resp.StatusCode,
-			Status:       strings.ToLower(http.StatusText(resp.StatusCode)),
+			Status:       "ok",
 			CustomError:  nil,
 			BrokenLinks:  []BrokenLink{},
 			SEO:          SEOData,
