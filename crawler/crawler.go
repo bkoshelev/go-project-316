@@ -33,7 +33,7 @@ type Job struct {
 	PageOptions page.PageOptions
 	LinkOptions link.LinkOptions
 }
-type AnalyzeOutput struct {
+type Report struct {
 	RootURL     string      `json:"root_url" binding:"required"`
 	Depth       int         `json:"depth" binding:"required"`
 	GeneratedAt string      `json:"generated_at" binding:"required"`
@@ -160,7 +160,7 @@ type Crawler struct {
 	cache            Cache
 }
 
-func (c *Crawler) createOutput() AnalyzeOutput {
+func (c *Crawler) createOutput() Report {
 	for _, link := range c.cache.links {
 		for _, pageURL := range link.PageURLs {
 
@@ -185,7 +185,7 @@ func (c *Crawler) createOutput() AnalyzeOutput {
 		}
 	}
 
-	output := AnalyzeOutput{
+	output := Report{
 		RootURL:     c.URL,
 		Depth:       c.Depth,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -366,10 +366,10 @@ func createNewCrawler(ctx context.Context, opts Options) *Crawler {
 	return &crawler
 }
 
-func (c *Crawler) validateOptions() (AnalyzeOutput, bool) {
+func (c *Crawler) validateOptions() (Report, bool) {
 	parsedLink, err := url.Parse(c.URL)
 	if err != nil {
-		return AnalyzeOutput{
+		return Report{
 			RootURL:     c.URL,
 			Depth:       c.Depth,
 			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -379,7 +379,7 @@ func (c *Crawler) validateOptions() (AnalyzeOutput, bool) {
 		}, false
 	}
 	if !link.ValidateLink(parsedLink) {
-		return AnalyzeOutput{
+		return Report{
 			RootURL:     c.URL,
 			Depth:       c.Depth,
 			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -388,7 +388,7 @@ func (c *Crawler) validateOptions() (AnalyzeOutput, bool) {
 			},
 		}, false
 	}
-	return AnalyzeOutput{}, true
+	return Report{}, true
 }
 
 func (c *Crawler) prepareAnalyze() {
@@ -467,7 +467,7 @@ func (c *Crawler) startAnalyze() {
 	c.Channels.delayFinished <- struct{}{}
 }
 
-func (output AnalyzeOutput) Format(indentJSON bool) ([]byte, error) {
+func (output Report) Format(indentJSON bool) ([]byte, error) {
 	var fmtOutput []byte
 	var err error
 
@@ -483,7 +483,7 @@ func (output AnalyzeOutput) Format(indentJSON bool) ([]byte, error) {
 	return fmtOutput, nil
 }
 
-func AnalyzeToJSONOutput(ctx context.Context, opts Options) AnalyzeOutput {
+func AnalyzeToJSONOutput(ctx context.Context, opts Options) Report {
 	crawler := createNewCrawler(ctx, opts)
 	output, isValid := crawler.validateOptions()
 

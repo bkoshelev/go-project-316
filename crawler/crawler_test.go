@@ -73,7 +73,7 @@ func AssertAssets(t testing.TB, want, got []page.Asset) {
 	}
 }
 
-func AssertAnalyzeOutput(t testing.TB, want, got AnalyzeOutput) {
+func AssertAnalyzeOutput(t testing.TB, want, got Report) {
 	t.Helper()
 	assert.Equal(t, want.Depth, got.Depth)
 	assert.Equal(t, want.RootURL, got.RootURL)
@@ -98,7 +98,7 @@ func AssertAnalyzeOutput(t testing.TB, want, got AnalyzeOutput) {
 }
 
 type createHTTPClient func() (*httptest.Server, *http.Client)
-type createWant func(URL string) AnalyzeOutput
+type createWant func(URL string) Report
 type createOptions func(server *httptest.Server, client *http.Client) Options
 
 func TestCrawler_Subtests(t *testing.T) {
@@ -125,8 +125,8 @@ func TestCrawler_Subtests(t *testing.T) {
 					Timeout:     time.Second * 15,
 				}
 			}),
-			func(URL string) AnalyzeOutput {
-				return AnalyzeOutput{
+			func(URL string) Report {
+				return Report{
 					RootURL: URL,
 					Depth:   0,
 					Pages: []page.Page{
@@ -159,8 +159,8 @@ func TestCrawler_Subtests(t *testing.T) {
 					Timeout:     time.Second * 15,
 				}
 			}),
-			createWant(func(URL string) AnalyzeOutput {
-				return AnalyzeOutput{
+			createWant(func(URL string) Report {
+				return Report{
 					RootURL: URL,
 					Depth:   0,
 					Pages: []page.Page{
@@ -193,8 +193,8 @@ func TestCrawler_Subtests(t *testing.T) {
 					Timeout:     time.Millisecond * 100,
 				}
 			}),
-			createWant(func(URL string) AnalyzeOutput {
-				return AnalyzeOutput{
+			createWant(func(URL string) Report {
+				return Report{
 					RootURL: URL,
 					Depth:   0,
 					Pages: []page.Page{
@@ -228,9 +228,9 @@ func TestCrawler_Subtests(t *testing.T) {
 					Timeout:     time.Second * 15,
 				}
 			}),
-			createWant(func(URL string) AnalyzeOutput {
+			createWant(func(URL string) Report {
 
-				return AnalyzeOutput{
+				return Report{
 					RootURL: URL,
 					Depth:   0,
 					Pages: []page.Page{
@@ -282,14 +282,14 @@ func TestCrawler_Subtests(t *testing.T) {
 					Timeout:     time.Second * 15,
 				}
 			}),
-			createWant(func(URL string) AnalyzeOutput {
+			createWant(func(URL string) Report {
 				parsedURL, err := url.Parse(URL)
 
 				if err != nil {
 					panic("ошибка парсинга")
 				}
 
-				return AnalyzeOutput{
+				return Report{
 					RootURL: URL,
 					Depth:   0,
 					Pages: []page.Page{
@@ -344,9 +344,9 @@ func TestCrawler_Subtests(t *testing.T) {
 					Timeout:     time.Second * 15,
 				}
 			}),
-			createWant(func(URL string) AnalyzeOutput {
+			createWant(func(URL string) Report {
 
-				return AnalyzeOutput{
+				return Report{
 					RootURL: URL,
 					Depth:   0,
 					Pages: []page.Page{
@@ -403,9 +403,9 @@ func TestCrawler_Subtests(t *testing.T) {
 					Timeout:     time.Second * 15,
 				}
 			}),
-			createWant(func(URL string) AnalyzeOutput {
+			createWant(func(URL string) Report {
 
-				return AnalyzeOutput{
+				return Report{
 					RootURL: URL,
 					Depth:   0,
 					Pages: []page.Page{
@@ -482,14 +482,14 @@ func TestCrawler_Subtests(t *testing.T) {
 					Timeout:     time.Second * 15,
 				}
 			}),
-			createWant(func(URL string) AnalyzeOutput {
+			createWant(func(URL string) Report {
 				parsedURL, err := url.Parse(URL)
 
 				if err != nil {
 					panic("ошибка парсинга")
 				}
 
-				return AnalyzeOutput{
+				return Report{
 					RootURL: URL,
 					Depth:   2,
 					Pages: []page.Page{
@@ -580,8 +580,8 @@ func TestCrawler_Subtests(t *testing.T) {
 					Retries:     2,
 				}
 			}),
-			createWant(func(URL string) AnalyzeOutput {
-				return AnalyzeOutput{
+			createWant(func(URL string) Report {
+				return Report{
 					RootURL: URL,
 					Depth:   2,
 					Pages: []page.Page{
@@ -626,8 +626,8 @@ func TestCrawler_Subtests(t *testing.T) {
 					Retries:     2,
 				}
 			}),
-			createWant(func(URL string) AnalyzeOutput {
-				return AnalyzeOutput{
+			createWant(func(URL string) Report {
+				return Report{
 					RootURL: URL,
 					Depth:   2,
 					Pages: []page.Page{
@@ -691,14 +691,14 @@ func TestCrawler_Subtests(t *testing.T) {
 					Timeout:     time.Second * 15,
 				}
 			}),
-			createWant(func(URL string) AnalyzeOutput {
+			createWant(func(URL string) Report {
 				parsedURL, err := url.Parse(URL)
 
 				if err != nil {
 					panic("ошибка парсинга")
 				}
 
-				return AnalyzeOutput{
+				return Report{
 					RootURL: URL,
 					Depth:   0,
 					Pages: []page.Page{
@@ -885,7 +885,7 @@ func TestCrawler_RetriesAndContextCancel(t *testing.T) {
 			},
 		)
 
-		want := AnalyzeOutput{
+		want := Report{
 			RootURL: "https://test.url/",
 			Depth:   2,
 			Pages:   []page.Page{},
