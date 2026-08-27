@@ -4,6 +4,7 @@ import (
 	"code/internal/fetcher"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -160,6 +161,9 @@ func AnalyzePage(ctx context.Context,
 
 	// 2. Получаем SEO-данные
 	SEOData := SEO{}
+
+	slog.Info("Текст HTML файла страницы " + pageOpts.PageURL)
+	slog.Info(doc.Html())
 
 	if doc.Find("h1").Length() > 0 {
 		SEOData.HasH1 = true
