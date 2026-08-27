@@ -3,8 +3,6 @@ package fetcher
 import (
 	"context"
 	"errors"
-	"fmt"
-	"log/slog"
 	"net/http"
 	"time"
 )
@@ -44,11 +42,6 @@ func (h HTTPFetch) MakeRequest(ctx context.Context, URL, method string) (*http.R
 
 			h.StartPauseCh <- struct{}{}
 
-			defer func() {
-				slog.Info("Запрос выполнен")
-			}()
-			slog.Info("Новый запрос")
-
 			if method != http.MethodHead && method != http.MethodGet {
 				return nil, errors.New("неверный тип запроса")
 			}
@@ -61,7 +54,7 @@ func (h HTTPFetch) MakeRequest(ctx context.Context, URL, method string) (*http.R
 			)
 
 			if err != nil {
-				return nil, fmt.Errorf("ошибка создания запроса: %w", err)
+				return nil, err
 			}
 
 			if h.UserAgent != "" {
@@ -71,7 +64,7 @@ func (h HTTPFetch) MakeRequest(ctx context.Context, URL, method string) (*http.R
 			resp, err := h.HTTPClient.Do(req)
 
 			if err != nil {
-				return nil, fmt.Errorf("ошибка выполнения запроса: %w", err)
+				return nil, err
 			}
 
 			return resp, nil

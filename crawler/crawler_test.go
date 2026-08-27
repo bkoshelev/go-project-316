@@ -809,7 +809,7 @@ func TestCrawler_WithDelay(t *testing.T) {
 				Depth:       2,
 				Concurrency: 5,
 				Timeout:     time.Second * 15,
-				Delay:       time.Millisecond * 250,
+				Delay:       time.Millisecond * 10000,
 			},
 		)
 
@@ -834,7 +834,7 @@ func (c *contextCanceHTTPClient) Do(r *http.Request) (*http.Response, error) {
 	var buf bytes.Buffer
 
 	switch r.URL.Path {
-	case "/":
+	case "":
 		select {
 		case <-time.After(200 * time.Millisecond):
 			break
@@ -886,7 +886,7 @@ func TestCrawler_RetriesAndContextCancel(t *testing.T) {
 		)
 
 		want := Report{
-			RootURL: "https://test.url/",
+			RootURL: "https://test.url",
 			Depth:   2,
 			Pages:   []page.Page{},
 		}

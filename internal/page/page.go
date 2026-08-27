@@ -4,7 +4,6 @@ import (
 	"code/internal/fetcher"
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -20,6 +19,15 @@ type BrokenLink struct {
 // https://medium.com/picus-security-engineering/custom-json-marshaller-in-go-and-common-pitfalls-c43fa774db05
 func (f *BrokenLink) MarshalJSON() ([]byte, error) {
 	type Alias BrokenLink
+
+	if f.CustomError == nil {
+		return json.Marshal(&struct {
+			*Alias
+		}{
+			Alias: (*Alias)(f),
+		})
+	}
+
 	return json.Marshal(&struct {
 		Error string `json:"error"`
 		*Alias
@@ -46,10 +54,8 @@ func (f *Page) MarshalJSON() ([]byte, error) {
 
 	if f.CustomError == nil {
 		return json.Marshal(&struct {
-			Error string `json:"error"`
 			*Alias
 		}{
-			Error: "",
 			Alias: (*Alias)(f),
 		})
 	}
@@ -99,10 +105,8 @@ func (f *Asset) MarshalJSON() ([]byte, error) {
 
 	if f.CustomError == nil {
 		return json.Marshal(&struct {
-			Error string `json:"error"`
 			*Alias
 		}{
-			Error: "",
 			Alias: (*Alias)(f),
 		})
 	}
@@ -128,7 +132,6 @@ func AnalyzePage(ctx context.Context,
 	if err != nil {
 		return PageResult{
 			PageOutput: Page{
-				BrokenLinks:  []BrokenLink{},
 				URL:          pageOpts.PageURL,
 				Depth:        pageOpts.Depth,
 				CustomError:  err,
@@ -146,7 +149,6 @@ func AnalyzePage(ctx context.Context,
 	if err != nil || resp.StatusCode >= http.StatusBadRequest {
 		return PageResult{
 			PageOutput: Page{
-				BrokenLinks:  []BrokenLink{},
 				URL:          pageOpts.PageURL,
 				Depth:        pageOpts.Depth,
 				CustomError:  err,
@@ -174,17 +176,23 @@ func AnalyzePage(ctx context.Context,
 	links := []LinkOptions{}
 
 	// 3. Ищем битые и рабочие ссылки
-	doc.Find("a").
+	doc.Find("a[href], img[src], script[src], link[href]").
 		Each(func(i int, s *goquery.Selection) {
-			LinkURL := s.AttrOr("href", "")
+			rawURL, ok := s.Attr("href")
+			if !ok {
+				rawURL, ok = s.Attr("src")
+			}
+
+			if !ok || rawURL == "" {
+				return
+			}
 
 			links = append(links, LinkOptions{
 				PageURL: pageOpts.PageURL,
-				LinkURL: LinkURL,
+				LinkURL: rawURL,
 				Depth:   pageOpts.Depth,
 			})
 		})
-	slog.Info("Анализ страницы завершен - 1")
 
 	// 4. Формируем отчет
 	return PageResult{
@@ -193,10 +201,10 @@ func AnalyzePage(ctx context.Context,
 			Depth:        pageOpts.Depth,
 			HTTPStatus:   resp.StatusCode,
 			Status:       "ok",
-			CustomError:  nil,
-			BrokenLinks:  []BrokenLink{},
 			SEO:          SEOData,
 			DiscoveredAt: time.Now().UTC().Format(time.RFC3339),
+			BrokenLinks:  []BrokenLink{},
+			Assets:       []Asset{},
 		},
 		Links: links,
 	}

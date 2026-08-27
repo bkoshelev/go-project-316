@@ -56,6 +56,8 @@ const (
 	Style  = "text/css"
 	Image  = "image/"
 	Page   = "text/html"
+	XML    = "text/xml"
+	AppXML = "application/xml"
 )
 
 func AnalyzeLink(
@@ -122,7 +124,9 @@ func AnalyzeLink(
 	contentType := resp.Header.Get("Content-Type")
 	mediaType, _, err := mime.ParseMediaType(contentType)
 
-	if mediaType == Page {
+	if mediaType == Page ||
+		mediaType == XML ||
+		mediaType == AppXML {
 		return LinkAnalyzeResult{
 			URL:            linkURL,
 			IsPage:         true,
@@ -194,6 +198,10 @@ func NormalizeLink(rawLink, pageURL string) (*url.URL, error) {
 	}
 
 	normalized := base.ResolveReference(link)
+
+	if normalized.Path == "/" {
+		normalized.Path = ""
+	}
 
 	return normalized, nil
 }

@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
@@ -79,51 +78,52 @@ func (q *Queue) IsEmpty() bool {
 }
 
 type LinksCache struct {
-	PageURLs          []string
-	LinkAnalyzeResult link.LinkAnalyzeResult
+	// PageURLs          []string
+	LinkAnalyzeResults link.LinkAnalyzeResult
 }
 
 type Cache struct {
-	Mu    sync.RWMutex
-	links map[string]LinksCache
-	pages map[string]page.Page
+	Mu sync.RWMutex
+	// brokenLinks map[string][]string
+	visitedLinks map[string]struct{}
+	linksInPages map[string][]string
+	linksData    map[string]link.LinkAnalyzeResult
+	pages        map[string]page.Page
 }
 
-func (c *Cache) AddLink(link link.LinkAnalyzeResult) {
+func (c *Cache) AddLink(newLink link.LinkAnalyzeResult) {
 	c.Mu.Lock()
 	defer c.Mu.Unlock()
 
-	cachedLink, ok := c.links[link.URL]
-	if !ok {
-		c.links[link.URL] = LinksCache{
-			LinkAnalyzeResult: link,
-			PageURLs:          []string{link.PageURL},
-		}
-	} else {
-		cachedLink.LinkAnalyzeResult = link
-		c.links[link.URL] = cachedLink
-	}
+	c.linksData[newLink.URL] = newLink
+
+	// pageLinks, ok := c.linksInPages[newLink.PageURL]
+	// if !ok {
+	// 	c.linksInPages[newLink.PageURL] = []string{newLink.URL}
+	// } else {
+	// 	pageLinks = append(pageLinks, newLink.URL)
+	// 	c.linksInPages[newLink.PageURL] = pageLinks
+	// }
 }
 
-func (c *Cache) UpdateLinkPageURLs(link link.LinkAnalyzeResult) {
+func (c *Cache) AddLinkToPage(linkURL string, pageURL string) {
 	c.Mu.Lock()
 	defer c.Mu.Unlock()
-
-	cachedLink, ok := c.links[link.URL]
+	c.visitedLinks[linkURL] = struct{}{}
+	pageLinks, ok := c.linksInPages[pageURL]
 	if !ok {
-		c.links[link.URL] = LinksCache{
-			PageURLs: []string{link.PageURL},
-		}
+		c.linksInPages[pageURL] = []string{linkURL}
 	} else {
-		cachedLink.PageURLs = append(cachedLink.PageURLs, link.PageURL)
-		c.links[link.URL] = cachedLink
+		pageLinks = append(pageLinks, linkURL)
+		c.linksInPages[pageURL] = pageLinks
 	}
+
 }
 
 func (c *Cache) isLinkWasVisited(key string) bool {
 	c.Mu.RLock()
 	defer c.Mu.RUnlock()
-	_, ok := c.links[key]
+	_, ok := c.visitedLinks[key]
 	return ok
 }
 
@@ -131,6 +131,11 @@ func (c *Cache) AddPage(page page.Page) {
 	c.Mu.Lock()
 	defer c.Mu.Unlock()
 
+	// pageData, ok := c.pages[page.URL]
+	// if ok {
+	// 	page.Assets = pageData.Assets
+	// 	page.BrokenLinks = pageData.BrokenLinks
+	// }
 	c.pages[page.URL] = page
 }
 
@@ -161,27 +166,27 @@ type Crawler struct {
 }
 
 func (c *Crawler) createOutput() Report {
-	for _, link := range c.cache.links {
-		for _, pageURL := range link.PageURLs {
+	for _, pageData := range c.cache.pages {
+		for _, linkURL := range c.cache.linksInPages[pageData.URL] {
 
-			currentPage, ok := c.cache.pages[pageURL]
+			linkData, ok := c.cache.linksData[linkURL]
 
 			if !ok {
 				continue
 			}
 
 			switch {
-			case link.LinkAnalyzeResult.IsBrokenLink:
-				currentPage.BrokenLinks = append(
-					currentPage.BrokenLinks, page.BrokenLink(link.LinkAnalyzeResult.LinkAnalyzeOutput),
+			case linkData.IsBrokenLink:
+				pageData.BrokenLinks = append(
+					pageData.BrokenLinks, page.BrokenLink(linkData.LinkAnalyzeOutput),
 				)
-			case link.LinkAnalyzeResult.IsAsset:
-				currentPage.Assets = append(
-					currentPage.Assets, page.Asset(link.LinkAnalyzeResult.AssetAnalyzeOutput),
+			case linkData.IsAsset:
+				pageData.Assets = append(
+					pageData.Assets, page.Asset(linkData.AssetAnalyzeOutput),
 				)
 			}
 
-			c.cache.pages[pageURL] = currentPage
+			c.cache.pages[pageData.URL] = pageData
 		}
 	}
 
@@ -204,7 +209,7 @@ func worker(
 			switch newJob.Type {
 			case "page":
 				pageOpts := newJob.PageOptions
-				slog.Info("Стартуем анализ страницы")
+
 				func() {
 					defer c.wg.Done()
 
@@ -241,7 +246,6 @@ func worker(
 						if !c.cache.isLinkWasVisited(parsedLink.String()) {
 
 							c.wg.Add(1)
-							slog.Info("Ссылка добавлена в очередь работ")
 
 							c.AnalyzeJobsQueue.Add(
 								Job{
@@ -250,14 +254,14 @@ func worker(
 								},
 							)
 						}
-						c.cache.UpdateLinkPageURLs(link.LinkAnalyzeResult{URL: parsedLink.String(), PageURL: linkOpts.PageURL})
+						c.cache.AddLinkToPage(parsedLink.String(), linkOpts.PageURL)
 
 					}
-					slog.Info("Анализ страницы завершен")
+
 				}()
 			case "link":
 				linkOpts := newJob.LinkOptions
-				slog.Info("Стартуем анализ ссылки")
+
 				func() {
 					defer c.wg.Done()
 
@@ -273,7 +277,7 @@ func worker(
 					}
 
 					if linkResult.IsBrokenLink {
-						slog.Info("Отчет анализа ссылки отправлен")
+
 						c.cache.AddLink(linkResult)
 						return
 					}
@@ -351,8 +355,10 @@ func createNewCrawler(ctx context.Context, opts Options) *Crawler {
 	}
 
 	crawler.cache = Cache{
-		links: map[string]LinksCache{},
-		pages: map[string]page.Page{},
+		linksData:    map[string]link.LinkAnalyzeResult{},
+		pages:        map[string]page.Page{},
+		visitedLinks: map[string]struct{}{},
+		linksInPages: map[string][]string{},
 	}
 
 	crawler.HTTPFetch = fetcher.CreateHTTPFetch(fetcher.Options{
@@ -388,6 +394,20 @@ func (c *Crawler) validateOptions() (Report, bool) {
 			},
 		}, false
 	}
+
+	normalizedLink, err := link.NormalizeLink(c.URL, c.URL)
+	if err != nil {
+		return Report{
+			RootURL:     c.URL,
+			Depth:       c.Depth,
+			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+			Pages: []page.Page{
+				{URL: c.URL, Depth: 0, CustomError: errors.New("invalid url")},
+			},
+		}, false
+	}
+	c.URL = normalizedLink.String()
+
 	return Report{}, true
 }
 
@@ -452,7 +472,7 @@ func (c *Crawler) createWorkers() {
 func (c *Crawler) startAnalyze() {
 	// стартуем анализ
 	c.wg.Add(1)
-	c.cache.UpdateLinkPageURLs(link.LinkAnalyzeResult{URL: c.URL, PageURL: ""})
+	c.cache.AddLinkToPage(c.URL, "")
 
 	c.AnalyzeJobsQueue.Add(
 		Job{
