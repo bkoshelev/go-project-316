@@ -4,8 +4,8 @@ import (
 	"code/internal/fetcher"
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -78,19 +78,21 @@ type SEO struct {
 }
 
 type LinkOptions struct {
-	PageURL string
+	PageURL *url.URL
 	LinkURL string
 	Depth   int
+	Type    string
 }
 
 type PageOptions struct {
-	PageURL string
+	PageURL *url.URL
 	Depth   int
 }
 
 type PageResult struct {
-	PageOutput Page
-	Links      []LinkOptions
+	IsUnsupportedPage bool
+	PageOutput        Page
+	Links             []LinkOptions
 }
 
 type Asset struct {
@@ -120,6 +122,14 @@ func (f *Asset) MarshalJSON() ([]byte, error) {
 	})
 }
 
+const (
+	PageLinkType   = "page"
+	StyleLinkType  = "style"
+	ScriptLinkType = "script"
+	ImgLinkType    = "image"
+	OtherLinkType  = "other"
+)
+
 func AnalyzePage(ctx context.Context,
 	pageOpts PageOptions,
 	httpFetcher fetcher.HTTPFetch,
@@ -128,16 +138,34 @@ func AnalyzePage(ctx context.Context,
 	defer cancel()
 
 	// 1. Получаем тело страницы
-	resp, err := httpFetcher.MakeRequest(ctx, pageOpts.PageURL, http.MethodGet)
+	resp, err := httpFetcher.MakeRequest(ctx, pageOpts.PageURL.String(), http.MethodGet)
+	isNetworkError := fetcher.IsNetworkError(err)
+	isServerError := resp != nil && resp.StatusCode >= http.StatusBadRequest
 
-	if err != nil {
+	if err != nil && isNetworkError {
 		return PageResult{
 			PageOutput: Page{
-				URL:          pageOpts.PageURL,
+				URL:          pageOpts.PageURL.String(),
 				Depth:        pageOpts.Depth,
 				CustomError:  err,
 				DiscoveredAt: time.Now().UTC().Format(time.RFC3339),
 				Status:       "error",
+			}}
+	}
+	if err != nil && !isNetworkError {
+		return PageResult{
+			IsUnsupportedPage: true,
+		}
+	}
+	if isServerError {
+		return PageResult{
+			PageOutput: Page{
+				URL:          pageOpts.PageURL.String(),
+				Depth:        pageOpts.Depth,
+				CustomError:  err,
+				DiscoveredAt: time.Now().UTC().Format(time.RFC3339),
+				Status:       "error",
+				HTTPStatus:   resp.StatusCode,
 			}}
 	}
 	defer func() {
@@ -146,62 +174,111 @@ func AnalyzePage(ctx context.Context,
 		}
 	}()
 
+	// 2. Получаем SEO-данные
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil || resp.StatusCode >= http.StatusBadRequest {
+
+	if err != nil {
 		return PageResult{
 			PageOutput: Page{
-				URL:          pageOpts.PageURL,
+				URL:          pageOpts.PageURL.String(),
 				Depth:        pageOpts.Depth,
 				CustomError:  err,
 				DiscoveredAt: time.Now().UTC().Format(time.RFC3339),
 				Status:       "error",
-				HTTPStatus:   resp.StatusCode,
 			}}
 	}
 
-	// 2. Получаем SEO-данные
 	SEOData := SEO{}
-
-	slog.Info("Текст HTML файла страницы " + pageOpts.PageURL)
-	slog.Info(doc.Html())
 
 	if doc.Find("h1").Length() > 0 {
 		SEOData.HasH1 = true
 	}
 	if doc.Find("title").Length() > 0 {
 		SEOData.HasTitle = true
-		SEOData.Title = doc.Find("title").Text()
+		SEOData.Title = doc.Find("title").First().Text()
 	}
 	if doc.Find(`meta[name="description"]`).Length() > 0 {
 		SEOData.HasDescription = true
-		SEOData.Description = doc.Find(`meta[name="description"]`).AttrOr("content", "")
+		SEOData.Description = doc.Find(`meta[name="description"]`).First().AttrOr("content", "")
 	}
 
 	links := []LinkOptions{}
 
 	// 3. Ищем битые и рабочие ссылки
-	doc.Find("a[href], img[src], script[src], link[href]").
-		Each(func(i int, s *goquery.Selection) {
-			rawURL, ok := s.Attr("href")
-			if !ok {
-				rawURL, ok = s.Attr("src")
-			}
+	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
+		rawURL, ok := s.Attr("href")
+		if !ok {
+			return
+		}
 
-			if !ok || rawURL == "" {
-				return
-			}
-
-			links = append(links, LinkOptions{
-				PageURL: pageOpts.PageURL,
-				LinkURL: rawURL,
-				Depth:   pageOpts.Depth,
-			})
+		links = append(links, LinkOptions{
+			PageURL: pageOpts.PageURL,
+			LinkURL: rawURL,
+			Depth:   pageOpts.Depth,
+			Type:    PageLinkType,
 		})
+	})
+
+	doc.Find("img[src]").Each(func(i int, s *goquery.Selection) {
+		rawURL, ok := s.Attr("src")
+		if !ok {
+			return
+		}
+
+		links = append(links, LinkOptions{
+			PageURL: pageOpts.PageURL,
+			LinkURL: rawURL,
+			Depth:   pageOpts.Depth,
+			Type:    ImgLinkType,
+		})
+	})
+
+	doc.Find("script[src]").Each(func(i int, s *goquery.Selection) {
+		rawURL, ok := s.Attr("src")
+		if !ok {
+			return
+		}
+
+		links = append(links, LinkOptions{
+			PageURL: pageOpts.PageURL,
+			LinkURL: rawURL,
+			Depth:   pageOpts.Depth,
+			Type:    ScriptLinkType,
+		})
+	})
+
+	doc.Find(`link[rel="stylesheet"][href]`).Each(func(i int, s *goquery.Selection) {
+		rawURL, ok := s.Attr("href")
+		if !ok {
+			return
+		}
+
+		links = append(links, LinkOptions{
+			PageURL: pageOpts.PageURL,
+			LinkURL: rawURL,
+			Depth:   pageOpts.Depth,
+			Type:    StyleLinkType,
+		})
+	})
+
+	doc.Find("audio[src] video[src]").Each(func(i int, s *goquery.Selection) {
+		rawURL, ok := s.Attr("src")
+		if !ok {
+			return
+		}
+
+		links = append(links, LinkOptions{
+			PageURL: pageOpts.PageURL,
+			LinkURL: rawURL,
+			Depth:   pageOpts.Depth,
+			Type:    OtherLinkType,
+		})
+	})
 
 	// 4. Формируем отчет
 	return PageResult{
 		PageOutput: Page{
-			URL:          pageOpts.PageURL,
+			URL:          pageOpts.PageURL.String(),
 			Depth:        pageOpts.Depth,
 			HTTPStatus:   resp.StatusCode,
 			Status:       "ok",

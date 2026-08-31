@@ -283,12 +283,6 @@ func TestCrawler_Subtests(t *testing.T) {
 				}
 			}),
 			createWant(func(URL string) Report {
-				parsedURL, err := url.Parse(URL)
-
-				if err != nil {
-					panic("ошибка парсинга")
-				}
-
 				return Report{
 					RootURL: URL,
 					Depth:   0,
@@ -301,7 +295,6 @@ func TestCrawler_Subtests(t *testing.T) {
 							Status:      "ok",
 							BrokenLinks: []page.BrokenLink{
 								{URL: URL + "/contacts", StatusCode: 404, CustomError: errors.New("Not Found")},
-								{URL: "https://" + parsedURL.Host + "/app.js", StatusCode: 404, CustomError: errors.New("Not Found")},
 							},
 							SEO: page.SEO{
 								HasTitle: true,
@@ -483,12 +476,6 @@ func TestCrawler_Subtests(t *testing.T) {
 				}
 			}),
 			createWant(func(URL string) Report {
-				parsedURL, err := url.Parse(URL)
-
-				if err != nil {
-					panic("ошибка парсинга")
-				}
-
 				return Report{
 					RootURL: URL,
 					Depth:   2,
@@ -499,9 +486,7 @@ func TestCrawler_Subtests(t *testing.T) {
 							CustomError: nil,
 							HTTPStatus:  200,
 							Status:      "ok",
-							BrokenLinks: []page.BrokenLink{
-								{URL: "https://" + parsedURL.Host + "/app.js", StatusCode: 404, CustomError: errors.New("Not Found")},
-							},
+							BrokenLinks: []page.BrokenLink{},
 							SEO: page.SEO{
 								HasTitle:       true,
 								Title:          "Simple Test",
@@ -731,7 +716,7 @@ func TestCrawler_Subtests(t *testing.T) {
 			server, client := c.createHTTPClient()
 			defer server.Close()
 
-			got := AnalyzeToJSONOutput(
+			got := createReport(
 				context.Background(),
 				c.createOptions(server, client),
 			)
@@ -801,7 +786,7 @@ func TestCrawler_WithDelay(t *testing.T) {
 		windowStart := time.Now()
 		windowEnd := windowStart.Add(time.Second)
 
-		AnalyzeToJSONOutput(
+		createReport(
 			context.Background(),
 			Options{
 				URL:         "https://test.url/",
@@ -872,7 +857,7 @@ func TestCrawler_RetriesAndContextCancel(t *testing.T) {
 
 		HTTPClient := &contextCanceHTTPClient{t: t}
 
-		got := AnalyzeToJSONOutput(
+		got := createReport(
 			ctx,
 			Options{
 				URL:         "https://test.url/",
@@ -904,7 +889,7 @@ func (c *assetHTTPClient) Do(r *http.Request) (*http.Response, error) {
 	var buf bytes.Buffer
 
 	switch r.URL.Path {
-	case "/":
+	case "":
 		tmpl, _ := template.ParseFiles("../testdata/fixtures/index.html")
 		err := tmpl.Execute(&buf, map[string]string{
 			"BaseURL": r.Host,
@@ -962,7 +947,7 @@ func TestCrawler_Assets(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		HTTPClient := &assetHTTPClient{t: t}
 
-		AnalyzeToJSONOutput(
+		createReport(
 			context.Background(),
 			Options{
 				URL:         "https://test.url/",

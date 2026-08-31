@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,6 +16,7 @@ type LinkOptions struct {
 	PageURL *url.URL
 	LinkURL *url.URL
 	Depth   int
+	Type    string
 }
 
 type LinkAnalyzeOutput struct {
@@ -26,19 +26,18 @@ type LinkAnalyzeOutput struct {
 }
 
 type PageOptions struct {
-	PageURL string
+	PageURL *url.URL
 	Depth   int
 }
 
 type LinkAnalyzeResult struct {
-	URL                string
+	URL                *url.URL
 	PageURL            string
 	LinkAnalyzeOutput  LinkAnalyzeOutput
 	AssetAnalyzeOutput AssetAnalyzeOutput
 	PageOptions        page.PageOptions
 	IsBrokenLink       bool
 	IsPage             bool
-	IsUnsupportedLink  bool
 	IsExternalHost     bool
 	IsAsset            bool
 }
@@ -51,15 +50,6 @@ type AssetAnalyzeOutput struct {
 	CustomError error
 }
 
-const (
-	Script = "text/javascript"
-	Style  = "text/css"
-	Image  = "image/"
-	Page   = "text/html"
-	XML    = "text/xml"
-	AppXML = "application/xml"
-)
-
 func AnalyzeLink(
 	ctx context.Context,
 	linkOptions LinkOptions,
@@ -68,13 +58,13 @@ func AnalyzeLink(
 	ctx, cancel := context.WithTimeout(ctx, httpFetcher.Timeout)
 	defer cancel()
 
-	linkURL := linkOptions.LinkURL.String()
 	pageURL := linkOptions.PageURL.String()
+	linkURL := linkOptions.LinkURL.String()
 
 	resp, err := httpFetcher.MakeRequest(ctx, linkURL, http.MethodHead)
 	if err != nil {
 		return LinkAnalyzeResult{
-			URL:          linkURL,
+			URL:          linkOptions.LinkURL,
 			PageURL:      pageURL,
 			IsBrokenLink: true,
 			LinkAnalyzeOutput: LinkAnalyzeOutput{
@@ -89,15 +79,30 @@ func AnalyzeLink(
 		}
 	}()
 
-	if resp.StatusCode == http.StatusMethodNotAllowed || resp.ContentLength == -1 {
-		resp, err = httpFetcher.MakeRequest(ctx, linkURL, http.MethodGet)
+	bodySizeReturned := resp.ContentLength != fetcher.BodySizeIsUnknown
+
+	if resp.StatusCode == http.StatusMethodNotAllowed || !bodySizeReturned {
+		resp, err := httpFetcher.MakeRequest(ctx, linkURL, http.MethodGet)
 		if err != nil {
+			if linkOptions.Type == "page" {
+				return LinkAnalyzeResult{
+					URL:          linkOptions.LinkURL,
+					PageURL:      pageURL,
+					IsBrokenLink: true,
+					LinkAnalyzeOutput: LinkAnalyzeOutput{
+						URL:         linkURL,
+						CustomError: err,
+					},
+				}
+			}
+
 			return LinkAnalyzeResult{
-				URL:          linkURL,
-				PageURL:      pageURL,
-				IsBrokenLink: true,
-				LinkAnalyzeOutput: LinkAnalyzeOutput{
+				URL:     linkOptions.LinkURL,
+				PageURL: pageURL,
+				IsAsset: true,
+				AssetAnalyzeOutput: AssetAnalyzeOutput{
 					URL:         linkURL,
+					Type:        linkOptions.Type,
 					CustomError: err,
 				},
 			}
@@ -110,63 +115,59 @@ func AnalyzeLink(
 	}
 
 	if resp.StatusCode >= http.StatusBadRequest {
+		if linkOptions.Type == "page" {
+			return LinkAnalyzeResult{
+				URL:          linkOptions.LinkURL,
+				PageURL:      pageURL,
+				IsBrokenLink: true,
+				LinkAnalyzeOutput: LinkAnalyzeOutput{
+					URL:         linkURL,
+					StatusCode:  resp.StatusCode,
+					CustomError: errors.New(http.StatusText(resp.StatusCode)),
+				}}
+		}
+
 		return LinkAnalyzeResult{
-			URL:          linkURL,
-			PageURL:      pageURL,
-			IsBrokenLink: true,
-			LinkAnalyzeOutput: LinkAnalyzeOutput{
+			URL:     linkOptions.LinkURL,
+			PageURL: pageURL,
+			IsAsset: true,
+			AssetAnalyzeOutput: AssetAnalyzeOutput{
 				URL:         linkURL,
+				Type:        linkOptions.Type,
 				StatusCode:  resp.StatusCode,
 				CustomError: errors.New(http.StatusText(resp.StatusCode)),
-			}}
+			},
+		}
 	}
 
-	contentType := resp.Header.Get("Content-Type")
-	mediaType, _, err := mime.ParseMediaType(contentType)
-
-	if mediaType == Page ||
-		mediaType == XML ||
-		mediaType == AppXML {
+	if linkOptions.Type == "page" {
 		return LinkAnalyzeResult{
-			URL:            linkURL,
+			URL:            linkOptions.LinkURL,
 			IsPage:         true,
 			IsExternalHost: linkOptions.LinkURL.Host != linkOptions.PageURL.Host,
 			PageOptions: page.PageOptions{
 				Depth:   linkOptions.Depth + 1,
-				PageURL: linkURL,
+				PageURL: linkOptions.LinkURL,
 			},
 		}
 	}
 
 	var size int64
-	assetType := ""
+	bodySizeReturned = resp.ContentLength != fetcher.BodySizeIsUnknown
 
-	switch {
-	case mediaType == Style:
-		assetType = "style"
-	case mediaType == Script:
-		assetType = "script"
-	case strings.HasPrefix(mediaType, Image):
-		assetType = "image"
-	case err != nil:
-		assetType = "other"
-	default:
-		assetType = "other"
-	}
-
-	if resp.ContentLength != -1 {
+	if bodySizeReturned {
 		size = resp.ContentLength
 	} else {
 		size, err = io.Copy(io.Discard, resp.Body)
 		if err != nil {
 			return LinkAnalyzeResult{
 				PageURL: pageURL,
-				URL:     linkURL,
+				URL:     linkOptions.LinkURL,
 				IsAsset: true,
 				AssetAnalyzeOutput: AssetAnalyzeOutput{
 					URL:         linkURL,
 					StatusCode:  resp.StatusCode,
-					Type:        assetType,
+					Type:        linkOptions.Type,
 					CustomError: err,
 				},
 			}
@@ -174,13 +175,13 @@ func AnalyzeLink(
 	}
 
 	return LinkAnalyzeResult{
-		URL:     linkURL,
+		URL:     linkOptions.LinkURL,
 		PageURL: pageURL,
 		IsAsset: true,
 		AssetAnalyzeOutput: AssetAnalyzeOutput{
 			URL:        linkURL,
 			StatusCode: resp.StatusCode,
-			Type:       assetType,
+			Type:       linkOptions.Type,
 			SizeBytes:  size,
 		},
 	}

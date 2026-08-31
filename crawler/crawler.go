@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"cmp"
 	"code/internal/fetcher"
 	"code/internal/link"
 	"code/internal/page"
@@ -29,6 +30,7 @@ type Options struct {
 
 type Job struct {
 	Type        string
+	URL         *url.URL
 	PageOptions page.PageOptions
 	LinkOptions link.LinkOptions
 }
@@ -40,9 +42,10 @@ type Report struct {
 }
 
 type Queue struct {
-	Mu      sync.RWMutex
-	M       []Job
-	Crawler *Crawler
+	Mu           sync.RWMutex
+	M            []Job
+	VisitedLinks []string
+	Crawler      *Crawler
 }
 
 func (q *Queue) Shift() (Job, bool) {
@@ -63,6 +66,7 @@ func (q *Queue) Add(value Job) {
 	defer q.Mu.Unlock()
 
 	q.M = append(q.M, value)
+	q.VisitedLinks = append(q.VisitedLinks, value.URL.String())
 
 	select {
 	case q.Crawler.Channels.newJobReadyForAnalyze <- struct{}{}:
@@ -70,22 +74,18 @@ func (q *Queue) Add(value Job) {
 	}
 }
 
-func (q *Queue) IsEmpty() bool {
-	q.Mu.RLock()
-	defer q.Mu.RUnlock()
-
-	return len(q.M) == 0
+func (c *Queue) linkAlreadyInJobQueue(key string) bool {
+	c.Mu.RLock()
+	defer c.Mu.RUnlock()
+	return slices.Contains(c.VisitedLinks, key)
 }
 
 type LinksCache struct {
-	// PageURLs          []string
 	LinkAnalyzeResults link.LinkAnalyzeResult
 }
 
 type Cache struct {
-	Mu sync.RWMutex
-	// brokenLinks map[string][]string
-	visitedLinks map[string]struct{}
+	Mu           sync.RWMutex
 	linksInPages map[string][]string
 	linksData    map[string]link.LinkAnalyzeResult
 	pages        map[string]page.Page
@@ -95,21 +95,13 @@ func (c *Cache) AddLink(newLink link.LinkAnalyzeResult) {
 	c.Mu.Lock()
 	defer c.Mu.Unlock()
 
-	c.linksData[newLink.URL] = newLink
+	c.linksData[newLink.URL.String()] = newLink
 
-	// pageLinks, ok := c.linksInPages[newLink.PageURL]
-	// if !ok {
-	// 	c.linksInPages[newLink.PageURL] = []string{newLink.URL}
-	// } else {
-	// 	pageLinks = append(pageLinks, newLink.URL)
-	// 	c.linksInPages[newLink.PageURL] = pageLinks
-	// }
 }
 
 func (c *Cache) AddLinkToPage(linkURL string, pageURL string) {
 	c.Mu.Lock()
 	defer c.Mu.Unlock()
-	c.visitedLinks[linkURL] = struct{}{}
 	pageLinks, ok := c.linksInPages[pageURL]
 	if !ok {
 		c.linksInPages[pageURL] = []string{linkURL}
@@ -117,25 +109,12 @@ func (c *Cache) AddLinkToPage(linkURL string, pageURL string) {
 		pageLinks = append(pageLinks, linkURL)
 		c.linksInPages[pageURL] = pageLinks
 	}
-
-}
-
-func (c *Cache) isLinkWasVisited(key string) bool {
-	c.Mu.RLock()
-	defer c.Mu.RUnlock()
-	_, ok := c.visitedLinks[key]
-	return ok
 }
 
 func (c *Cache) AddPage(page page.Page) {
 	c.Mu.Lock()
 	defer c.Mu.Unlock()
 
-	// pageData, ok := c.pages[page.URL]
-	// if ok {
-	// 	page.Assets = pageData.Assets
-	// 	page.BrokenLinks = pageData.BrokenLinks
-	// }
 	c.pages[page.URL] = page
 }
 
@@ -147,7 +126,7 @@ type Channels struct {
 }
 
 type Crawler struct {
-	URL              string
+	URL              *url.URL
 	Depth            int
 	Retries          int
 	Delay            time.Duration
@@ -188,13 +167,29 @@ func (c *Crawler) createOutput() Report {
 
 			c.cache.pages[pageData.URL] = pageData
 		}
+
+		slices.SortFunc(pageData.Assets, func(asset1, asset2 page.Asset) int {
+			return cmp.Compare(asset1.Type, asset2.Type)
+		})
+		slices.SortFunc(pageData.BrokenLinks, func(brokenLink1, brokenLink2 page.BrokenLink) int {
+			return cmp.Compare(brokenLink1.URL, brokenLink2.URL)
+		})
 	}
 
+	pagesSlice := slices.Collect(maps.Values(c.cache.pages))
+
+	slices.SortFunc(pagesSlice, func(page1, page2 page.Page) int {
+		if result := cmp.Compare(page1.Depth, page2.Depth); result != 0 {
+			return result
+		}
+		return cmp.Compare(page1.URL, page2.URL)
+	})
+
 	output := Report{
-		RootURL:     c.URL,
+		RootURL:     c.URL.String(),
 		Depth:       c.Depth,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		Pages:       slices.Collect(maps.Values(c.cache.pages)),
+		Pages:       pagesSlice,
 	}
 
 	return output
@@ -213,21 +208,13 @@ func worker(
 				func() {
 					defer c.wg.Done()
 
-					parsedPageURL, err := url.Parse(pageOpts.PageURL)
-					if err != nil {
-						c.cache.AddPage(page.Page{
-							URL:         pageOpts.PageURL,
-							Depth:       pageOpts.Depth,
-							CustomError: err,
-						})
+					pageResult := page.AnalyzePage(c.ctx, pageOpts, c.HTTPFetch)
+					if pageResult.IsUnsupportedPage {
 						return
 					}
-
-					pageResult := page.AnalyzePage(c.ctx, pageOpts, c.HTTPFetch)
 					c.cache.AddPage(pageResult.PageOutput)
 
 					for _, linkOpts := range pageResult.Links {
-
 						parsedLink, err := url.Parse(linkOpts.LinkURL)
 						if err != nil {
 							continue
@@ -236,28 +223,27 @@ func worker(
 						if !link.ValidateLink(parsedLink) {
 							continue
 						}
+
 						if !parsedLink.IsAbs() {
-							parsedLink, err = link.NormalizeLink(linkOpts.LinkURL, linkOpts.PageURL)
+							parsedLink, err = link.NormalizeLink(linkOpts.LinkURL, linkOpts.PageURL.String())
 							if err != nil {
 								continue
 							}
 						}
 
-						if !c.cache.isLinkWasVisited(parsedLink.String()) {
-
+						c.cache.AddLinkToPage(parsedLink.String(), linkOpts.PageURL.String())
+						if !c.AnalyzeJobsQueue.linkAlreadyInJobQueue(parsedLink.String()) {
 							c.wg.Add(1)
 
 							c.AnalyzeJobsQueue.Add(
 								Job{
 									Type:        "link",
-									LinkOptions: link.LinkOptions{PageURL: parsedPageURL, LinkURL: parsedLink, Depth: linkOpts.Depth},
+									URL:         parsedLink,
+									LinkOptions: link.LinkOptions{PageURL: pageOpts.PageURL, LinkURL: parsedLink, Depth: linkOpts.Depth, Type: linkOpts.Type},
 								},
 							)
 						}
-						c.cache.AddLinkToPage(parsedLink.String(), linkOpts.PageURL)
-
 					}
-
 				}()
 			case "link":
 				linkOpts := newJob.LinkOptions
@@ -267,17 +253,7 @@ func worker(
 
 					linkResult := link.AnalyzeLink(c.ctx, linkOpts, c.HTTPFetch)
 
-					if linkResult.IsUnsupportedLink {
-						return
-					}
-
-					if linkResult.IsAsset {
-						c.cache.AddLink(linkResult)
-						return
-					}
-
-					if linkResult.IsBrokenLink {
-
+					if linkResult.IsAsset || linkResult.IsBrokenLink {
 						c.cache.AddLink(linkResult)
 						return
 					}
@@ -290,6 +266,7 @@ func worker(
 							c.AnalyzeJobsQueue.Add(
 								Job{
 									Type:        "page",
+									URL:         linkResult.URL,
 									PageOptions: page.PageOptions(linkResult.PageOptions),
 								},
 							)
@@ -304,11 +281,23 @@ func worker(
 	}
 }
 
-func createNewCrawler(ctx context.Context, opts Options) *Crawler {
+func createNewCrawler(ctx context.Context, opts Options) (*Crawler, Report, bool) {
+
+	parsedLink, err := url.Parse(opts.URL)
+	if err != nil {
+		return &Crawler{}, Report{
+			RootURL:     opts.URL,
+			Depth:       opts.Depth,
+			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+			Pages: []page.Page{
+				{URL: opts.URL, Depth: 0, CustomError: errors.New("invalid url")},
+			},
+		}, false
+	}
 	ctx, cancel := context.WithCancel(ctx)
 
 	crawler := Crawler{
-		URL:        opts.URL,
+		URL:        parsedLink,
 		Retries:    opts.Retries,
 		Delay:      opts.Delay,
 		UserAgent:  opts.UserAgent,
@@ -319,8 +308,9 @@ func createNewCrawler(ctx context.Context, opts Options) *Crawler {
 	}
 
 	crawler.AnalyzeJobsQueue = &Queue{
-		M:       make([]Job, 0),
-		Crawler: &crawler,
+		M:            make([]Job, 0),
+		Crawler:      &crawler,
+		VisitedLinks: []string{},
 	}
 
 	if opts.Depth < 0 {
@@ -357,7 +347,6 @@ func createNewCrawler(ctx context.Context, opts Options) *Crawler {
 	crawler.cache = Cache{
 		linksData:    map[string]link.LinkAnalyzeResult{},
 		pages:        map[string]page.Page{},
-		visitedLinks: map[string]struct{}{},
 		linksInPages: map[string][]string{},
 	}
 
@@ -369,44 +358,34 @@ func createNewCrawler(ctx context.Context, opts Options) *Crawler {
 		Timeout:      crawler.Timeout,
 		Retries:      crawler.Retries,
 	})
-	return &crawler
+	return &crawler, Report{}, true
 }
 
 func (c *Crawler) validateOptions() (Report, bool) {
-	parsedLink, err := url.Parse(c.URL)
-	if err != nil {
+
+	if !link.ValidateLink(c.URL) {
 		return Report{
-			RootURL:     c.URL,
+			RootURL:     c.URL.String(),
 			Depth:       c.Depth,
 			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 			Pages: []page.Page{
-				{URL: c.URL, Depth: 0, CustomError: errors.New("invalid url")},
-			},
-		}, false
-	}
-	if !link.ValidateLink(parsedLink) {
-		return Report{
-			RootURL:     c.URL,
-			Depth:       c.Depth,
-			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-			Pages: []page.Page{
-				{URL: c.URL, Depth: 0, CustomError: errors.New("invalid url")},
+				{URL: c.URL.String(), Depth: 0, CustomError: errors.New("invalid url")},
 			},
 		}, false
 	}
 
-	normalizedLink, err := link.NormalizeLink(c.URL, c.URL)
+	normalizedLink, err := link.NormalizeLink(c.URL.String(), c.URL.String())
 	if err != nil {
 		return Report{
-			RootURL:     c.URL,
+			RootURL:     c.URL.String(),
 			Depth:       c.Depth,
 			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 			Pages: []page.Page{
-				{URL: c.URL, Depth: 0, CustomError: errors.New("invalid url")},
+				{URL: c.URL.String(), Depth: 0, CustomError: errors.New("invalid url")},
 			},
 		}, false
 	}
-	c.URL = normalizedLink.String()
+	c.URL = normalizedLink
 
 	return Report{}, true
 }
@@ -472,11 +451,11 @@ func (c *Crawler) createWorkers() {
 func (c *Crawler) startAnalyze() {
 	// стартуем анализ
 	c.wg.Add(1)
-	c.cache.AddLinkToPage(c.URL, "")
 
 	c.AnalyzeJobsQueue.Add(
 		Job{
 			Type: "page",
+			URL:  c.URL,
 			PageOptions: page.PageOptions{
 				PageURL: c.URL,
 				Depth:   0,
@@ -500,12 +479,18 @@ func (output Report) Format(indentJSON bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return fmtOutput, nil
 }
 
-func AnalyzeToJSONOutput(ctx context.Context, opts Options) Report {
-	crawler := createNewCrawler(ctx, opts)
-	output, isValid := crawler.validateOptions()
+func createReport(ctx context.Context, opts Options) Report {
+	crawler, output, isValid := createNewCrawler(ctx, opts)
+
+	if !isValid {
+		return output
+	}
+
+	output, isValid = crawler.validateOptions()
 
 	if !isValid {
 		return output
@@ -521,6 +506,6 @@ func AnalyzeToJSONOutput(ctx context.Context, opts Options) Report {
 }
 
 func Analyze(ctx context.Context, opts Options) ([]byte, error) {
-	outputJSON := AnalyzeToJSONOutput(ctx, opts)
-	return outputJSON.Format(opts.IndentJSON)
+	report := createReport(ctx, opts)
+	return report.Format(opts.IndentJSON)
 }

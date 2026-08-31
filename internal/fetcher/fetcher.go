@@ -3,7 +3,9 @@ package fetcher
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -28,6 +30,10 @@ type HTTPFetch struct {
 	Timeout      time.Duration
 	Retries      int
 }
+
+const (
+	BodySizeIsUnknown = -1
+)
 
 func (h HTTPFetch) MakeRequest(ctx context.Context, URL, method string) (*http.Response, error) {
 	tryIdx := 0
@@ -89,4 +95,22 @@ func (h HTTPFetch) MakeRequest(ctx context.Context, URL, method string) (*http.R
 
 func CreateHTTPFetch(options Options) HTTPFetch {
 	return HTTPFetch(options)
+}
+
+func IsNetworkError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		err = urlErr.Err
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }
