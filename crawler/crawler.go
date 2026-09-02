@@ -463,7 +463,11 @@ func (c *Crawler) startAnalyze() {
 		},
 	)
 
-	c.Channels.delayFinished <- struct{}{}
+	select {
+	case c.Channels.delayFinished <- struct{}{}:
+	case <-c.ctx.Done():
+		return
+	}
 }
 
 func (output Report) Format(indentJSON bool) ([]byte, error) {
@@ -500,8 +504,12 @@ func createReport(ctx context.Context, opts Options) Report {
 	crawler.createWorkers()
 	crawler.startAnalyze()
 
-	crawler.wg.Wait()
-	crawler.cancel()
+	go func() {
+		crawler.wg.Wait()
+		crawler.cancel()
+	}()
+
+	<-crawler.ctx.Done()
 	return crawler.createOutput()
 }
 

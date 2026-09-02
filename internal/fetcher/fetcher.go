@@ -46,7 +46,11 @@ func (h HTTPFetch) MakeRequest(ctx context.Context, URL, method string) (*http.R
 				return nil, ctx.Err()
 			}
 
-			h.StartPauseCh <- struct{}{}
+			select {
+			case h.StartPauseCh <- struct{}{}:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 
 			if method != http.MethodHead && method != http.MethodGet {
 				return nil, errors.New("неверный тип запроса")
