@@ -43,7 +43,8 @@ type Report struct {
 
 type Queue struct {
 	Mu           sync.RWMutex
-	M            []Job
+	ReadyToWork  []Job
+	InWork       int
 	VisitedLinks []string
 	Crawler      *Crawler
 }
@@ -52,20 +53,41 @@ func (q *Queue) Shift() (Job, bool) {
 	q.Mu.Lock()
 	defer q.Mu.Unlock()
 
-	if len(q.M) > 0 {
-		val := q.M[0]
-		q.M = q.M[1:]
+	if len(q.ReadyToWork) > 0 {
+		val := q.ReadyToWork[0]
+		q.ReadyToWork = q.ReadyToWork[1:]
 
+		q.InWork++
 		return val, true
 	}
+
 	return Job{}, false
+}
+
+func (q *Queue) Finish() {
+	q.Mu.Lock()
+	defer q.Mu.Unlock()
+
+	q.InWork--
+
+	select {
+	case q.Crawler.Channels.jobFinished <- struct{}{}:
+	default:
+	}
+}
+
+func (q *Queue) IsEmpty() bool {
+	q.Mu.Lock()
+	defer q.Mu.Unlock()
+
+	return len(q.ReadyToWork) == 0 && q.InWork == 0
 }
 
 func (q *Queue) Add(value Job) {
 	q.Mu.Lock()
 	defer q.Mu.Unlock()
 
-	q.M = append(q.M, value)
+	q.ReadyToWork = append(q.ReadyToWork, value)
 	q.VisitedLinks = append(q.VisitedLinks, value.URL.String())
 
 	select {
@@ -123,6 +145,7 @@ type Channels struct {
 	timerJob              chan struct{}
 	analyzeJobs           chan Job
 	newJobReadyForAnalyze chan struct{}
+	jobFinished           chan struct{}
 }
 
 type Crawler struct {
@@ -140,7 +163,6 @@ type Crawler struct {
 	AnalyzeJobsQueue *Queue
 	ctx              context.Context
 	cancel           context.CancelFunc
-	wg               *sync.WaitGroup
 	cache            Cache
 }
 
@@ -206,7 +228,9 @@ func worker(
 				pageOpts := newJob.PageOptions
 
 				func() {
-					defer c.wg.Done()
+					defer func() {
+						c.AnalyzeJobsQueue.Finish()
+					}()
 
 					pageResult := page.AnalyzePage(c.ctx, pageOpts, c.HTTPFetch)
 					if pageResult.IsUnsupportedPage {
@@ -233,7 +257,6 @@ func worker(
 
 						c.cache.AddLinkToPage(parsedLink.String(), linkOpts.PageURL.String())
 						if !c.AnalyzeJobsQueue.linkAlreadyInJobQueue(parsedLink.String()) {
-							c.wg.Add(1)
 
 							c.AnalyzeJobsQueue.Add(
 								Job{
@@ -249,7 +272,9 @@ func worker(
 				linkOpts := newJob.LinkOptions
 
 				func() {
-					defer c.wg.Done()
+					defer func() {
+						c.AnalyzeJobsQueue.Finish()
+					}()
 
 					linkResult := link.AnalyzeLink(c.ctx, linkOpts, c.HTTPFetch)
 
@@ -261,8 +286,6 @@ func worker(
 					if linkResult.IsPage {
 						if !linkResult.IsExternalHost &&
 							linkResult.PageOptions.Depth <= c.Depth {
-							c.wg.Add(1)
-
 							c.AnalyzeJobsQueue.Add(
 								Job{
 									Type:        "page",
@@ -304,11 +327,11 @@ func createNewCrawler(ctx context.Context, opts Options) (*Crawler, Report, bool
 		IndentJSON: opts.IndentJSON,
 		ctx:        ctx,
 		cancel:     cancel,
-		wg:         &sync.WaitGroup{},
 	}
 
 	crawler.AnalyzeJobsQueue = &Queue{
-		M:            make([]Job, 0),
+		ReadyToWork:  make([]Job, 0),
+		InWork:       0,
 		Crawler:      &crawler,
 		VisitedLinks: []string{},
 	}
@@ -342,6 +365,7 @@ func createNewCrawler(ctx context.Context, opts Options) (*Crawler, Report, bool
 		delayFinished:         make(chan struct{}),
 		analyzeJobs:           make(chan Job, crawler.Concurrency),
 		newJobReadyForAnalyze: make(chan struct{}, 1),
+		jobFinished:           make(chan struct{}, 1),
 	}
 
 	crawler.cache = Cache{
@@ -396,6 +420,10 @@ func (c *Crawler) prepareAnalyze() {
 		for {
 			select {
 			case <-c.Channels.newJobReadyForAnalyze:
+			case <-c.Channels.jobFinished:
+				if c.AnalyzeJobsQueue.IsEmpty() {
+					c.cancel()
+				}
 			case <-c.ctx.Done():
 				return
 			}
@@ -450,7 +478,6 @@ func (c *Crawler) createWorkers() {
 
 func (c *Crawler) startAnalyze() {
 	// стартуем анализ
-	c.wg.Add(1)
 
 	c.AnalyzeJobsQueue.Add(
 		Job{
@@ -503,11 +530,6 @@ func createReport(ctx context.Context, opts Options) Report {
 	crawler.prepareAnalyze()
 	crawler.createWorkers()
 	crawler.startAnalyze()
-
-	go func() {
-		crawler.wg.Wait()
-		crawler.cancel()
-	}()
 
 	<-crawler.ctx.Done()
 	return crawler.createOutput()
